@@ -72,11 +72,6 @@ The app uses mock data by default. To connect to a real API:
 
 ## 🚀 Deployment
 
-### Deploy to Vercel (Recommended)
-
-1. Install Vercel CLI: `npm i -g vercel`
-2. Run: `vercel`
-3. Follow the prompts
 
 ### Deploy to Netlify
 
