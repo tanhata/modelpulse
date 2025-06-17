@@ -4,7 +4,7 @@ A real-time AI model performance monitoring dashboard built with React. Track ke
 
 ## 🚀 Live Demo
 
-[View Live App](https://your-deployment-url.vercel.app)
+[View Live App](https://tanhata.github.io/modelpulse/)
 
 ## ✨ Features
 
