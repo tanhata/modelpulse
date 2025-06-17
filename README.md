@@ -101,14 +101,3 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
-## 🙏 Acknowledgments
-
-- Built during collaboration with Claude AI
-- Inspired by modern monitoring dashboards
-- Charts powered by Recharts library
-
-## 📧 Contact
-
-Your Name - [your.email@example.com](mailto:your.email@example.com)
-
-Project Link: [https://github.com/yourusername/modelpulse](https://github.com/yourusername/modelpulse)
