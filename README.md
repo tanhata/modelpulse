@@ -6,10 +6,6 @@ A real-time AI model performance monitoring dashboard built with React. Track ke
 
 [View Live App](https://your-deployment-url.vercel.app)
 
-## 📸 Screenshots
-
-![ModelPulse Dashboard](./screenshots/dashboard.png)
-
 ## ✨ Features
 
 - **Real-time Monitoring** - Live updates of model performance metrics
