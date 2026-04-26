@@ -1,3965 +1,3466 @@
-import React, { useState, useRef, useEffect } from 'react';
-import { LineChart, Line, XAxis, YAxis, ResponsiveContainer, BarChart, Bar, PieChart, Pie, Cell, AreaChart, Area, ReferenceLine } from 'recharts';
-import { BarChart3, AlertTriangle, TrendingUp, Activity, FileText, Clock, CheckCircle, XCircle, AlertCircle, Globe, Grid3X3, Bell, Eye, ArrowUp, ArrowDown, Zap, Shield } from 'lucide-react';
-import * as THREE from 'three';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
+import {
+  AlertTriangle, TrendingUp, BarChart3, FileText,
+  CheckCircle2, ChevronRight, ChevronDown, Search, Eye,
+  XCircle, Info, ShieldCheck, Settings, ListOrdered,
+  Pause, Play, ArrowDown, MoreHorizontal, RotateCw,
+  Wrench, ExternalLink, Globe2,
+  Check, Plus, Copy, Bell, Key, Hash
+} from 'lucide-react';
+import {
+  LineChart, Line, XAxis, YAxis, ResponsiveContainer,
+  CartesianGrid, Tooltip, BarChart, Bar
+} from 'recharts';
 
-// Sample deployment data for 3D visualization
-const deploymentData = [
-  { id: 1, name: 'US-East-1', lat: 39.0458, lng: -76.6413, status: 'healthy', latency: 45, throughput: 850, modelType: 'LLM' },
-  { id: 2, name: 'EU-West-1', lat: 53.3478, lng: -6.2597, status: 'warning', latency: 72, throughput: 420, modelType: 'Vision' },
-  { id: 3, name: 'Asia-Pacific', lat: 35.6762, lng: 139.6503, status: 'healthy', latency: 38, throughput: 920, modelType: 'LLM' },
-  { id: 4, name: 'US-West-2', lat: 45.5152, lng: -122.6784, status: 'healthy', latency: 52, throughput: 680, modelType: 'NLP' },
-  { id: 5, name: 'EU-Central', lat: 50.1109, lng: 8.6821, status: 'error', latency: 156, throughput: 120, modelType: 'Vision' },
-  { id: 6, name: 'Singapore', lat: 1.3521, lng: 103.8198, status: 'healthy', latency: 41, throughput: 750, modelType: 'Edge' }
+/* ═══════════════════════════════════════════════════════════════
+   SEVERITY MODEL — weighted, not binary
+   ─────────────────────────────────────────────────────────────── */
+
+const SEVERITY = { ok: 0, minor: 1, major: 2, crit: 3 };
+
+// Weighted rollup: 1 critical signal → critical
+//                  1 major signal OR 3+ minor signals → attention
+//                  otherwise → healthy
+const deriveStatus = (sub) => {
+  const scores = Object.values(sub).map(s => SEVERITY[s] ?? 0);
+  const max = Math.max(...scores);
+  const minorCount = scores.filter(s => s === 1).length;
+  if (max >= 3) return 'critical';
+  if (max >= 2 || minorCount >= 3) return 'attention';
+  return 'healthy';
+};
+
+/* ═══════════════════════════════════════════════════════════════
+   MOCK DATA — reconciles end-to-end, with time dimensions
+   ─────────────────────────────────────────────────────────────── */
+
+const activeRuns = [
+  {
+    id: 'code-gen-7b/pretrain-v3', model: 'code-gen-7b', run: 'pretrain-v3',
+    step: 8412, totalSteps: 50000, eta: '3d 11h',
+    throughputPerGpu: 2285, gpuCount: 8, loss: 0.150,
+    config: '7B · bf16 · FSDP × 8 × A100', startedAgo: '6d 12h', owner: 'you',
+    state: 'active',
+    // major: gap is real and growing for ~3,500 steps
+    subSignals: { gradNorm: 'ok', lossSpikes: 'ok', throughput: 'ok', evalGap: 'major' },
+    reason: 'Eval/train gap diverging since step 4,000'
+  },
+  {
+    id: 'retrieval-encoder/ablation-4', model: 'retrieval-encoder', run: 'ablation-4',
+    step: 14200, totalSteps: 20000, eta: '11h',
+    throughputPerGpu: 4100, gpuCount: 4, loss: 0.087,
+    config: '440M · bf16 · DDP × 4 × H100', startedAgo: '2d 3h', owner: 'you',
+    state: 'active',
+    subSignals: { gradNorm: 'minor', lossSpikes: 'ok', throughput: 'ok', evalGap: 'ok' },
+    reason: 'Gradient norm slightly elevated'
+  },
+  {
+    id: 'vision-base-3b/sft-r2', model: 'vision-base-3b', run: 'sft-r2',
+    step: 2840, totalSteps: 8000, eta: '2d 14h',
+    throughputPerGpu: 1820, gpuCount: 16, loss: 0.412,
+    config: '3B · fp16 · ZeRO-3 × 16', startedAgo: '18h', owner: 'm. chen',
+    state: 'active',
+    subSignals: { gradNorm: 'ok', lossSpikes: 'ok', throughput: 'ok', evalGap: 'ok' },
+    reason: null
+  }
 ];
 
-// Enhanced data with timestamps and thresholds
-const accuracyData = [
-  { x: 30, y: 0.85 }, { x: 32, y: 0.83 }, { x: 34, y: 0.86 }, { x: 36, y: 0.84 },
-  { x: 38, y: 0.87 }, { x: 40, y: 0.85 }, { x: 42, y: 0.88 }, { x: 44, y: 0.86 },
-  { x: 46, y: 0.89 }, { x: 48, y: 0.87 }, { x: 50, y: 0.90 }, { x: 52, y: 0.88 },
-  { x: 54, y: 0.91 }, { x: 56, y: 0.89 }, { x: 58, y: 0.82 }, { x: 60, y: 0.80 }
+// Workspaces — multi-tenancy across training orgs/clusters
+const workspaces = [
+  {
+    id: 'anthropic-research',
+    name: 'anthropic-research',
+    team: 'training-team · staging',
+    avatar: 'A',
+    gradient: 'linear-gradient(135deg, var(--brand-500), var(--brand-700))',
+    activeRuns: 3,
+    role: 'admin'
+  },
+  {
+    id: 'anthropic-prod',
+    name: 'anthropic-prod',
+    team: 'model-serving · production',
+    avatar: 'P',
+    gradient: 'linear-gradient(135deg, #f87171, #b91c1c)',
+    activeRuns: 1,
+    role: 'viewer'
+  },
+  {
+    id: 'experiments',
+    name: 'experiments-sandbox',
+    team: 'research · personal',
+    avatar: 'E',
+    gradient: 'linear-gradient(135deg, #06b6d4, #0e7490)',
+    activeRuns: 0,
+    role: 'admin'
+  },
 ];
 
-const latencyData = [
-  { x: 15, y: 45 }, { x: 15.2, y: 52 }, { x: 15.4, y: 38 }, { x: 15.6, y: 48 },
-  { x: 15.8, y: 42 }, { x: 16, y: 55 }, { x: 16.2, y: 35 }, { x: 16.4, y: 49 },
-  { x: 16.6, y: 41 }, { x: 16.8, y: 53 }, { x: 17, y: 37 }, { x: 17.2, y: 46 },
-  { x: 17.4, y: 44 }, { x: 17.6, y: 61 }, { x: 17.8, y: 68 }, { x: 18, y: 72 }
+// Historical runs for the Runs index page
+const historicalRuns = [
+  { id: 'vision-base-3b/sft-r1', state: 'failed', step: 3200, totalSteps: 8000, finalLoss: null,
+    config: '3B · fp16 · ZeRO-3 × 16', startedAgo: '8h ago', duration: '4h 12m', owner: 'm. chen',
+    failureReason: 'NaN loss at step 3,200' },
+  { id: 'code-gen-7b/pretrain-v2', state: 'completed', step: 50000, totalSteps: 50000, finalLoss: 0.142,
+    config: '7B · bf16 · FSDP × 8 × A100', startedAgo: '12d ago', duration: '6d 4h', owner: 'you',
+    failureReason: null },
+  { id: 'retrieval-encoder/ablation-3', state: 'completed', step: 20000, totalSteps: 20000, finalLoss: 0.094,
+    config: '440M · bf16 · DDP × 4 × H100', startedAgo: '5d ago', duration: '2d 8h', owner: 'you',
+    failureReason: null },
+  { id: 'retrieval-encoder/ablation-2', state: 'cancelled', step: 8400, totalSteps: 20000, finalLoss: 0.131,
+    config: '440M · bf16 · DDP × 4 × H100', startedAgo: '8d ago', duration: '1d 2h', owner: 'you',
+    failureReason: 'Cancelled by owner — wrong dataset' },
+  { id: 'code-gen-7b/pretrain-v1', state: 'failed', step: 12400, totalSteps: 50000, finalLoss: null,
+    config: '7B · bf16 · FSDP × 8 × A100', startedAgo: '20d ago', duration: '2d 18h', owner: 'you',
+    failureReason: 'Node failure on rank 3' },
+  { id: 'vision-base-1b/sft-r4', state: 'completed', step: 6000, totalSteps: 6000, finalLoss: 0.388,
+    config: '1B · fp16 · DDP × 8 · A100', startedAgo: '14d ago', duration: '14h', owner: 'm. chen',
+    failureReason: null },
+  { id: 'retrieval-encoder/ablation-1', state: 'completed', step: 20000, totalSteps: 20000, finalLoss: 0.156,
+    config: '440M · bf16 · DDP × 4 × H100', startedAgo: '11d ago', duration: '2d 6h', owner: 'k. patel',
+    failureReason: null },
+  { id: 'vision-base-3b/sft-r0', state: 'failed', step: 480, totalSteps: 8000, finalLoss: null,
+    config: '3B · fp16 · ZeRO-3 × 16', startedAgo: '15d ago', duration: '52m', owner: 'm. chen',
+    failureReason: 'OOM during eval' },
+  { id: 'code-gen-3b/baseline', state: 'completed', step: 30000, totalSteps: 30000, finalLoss: 0.198,
+    config: '3B · bf16 · FSDP × 8 · A100', startedAgo: '22d ago', duration: '4d 1h', owner: 'k. patel',
+    failureReason: null },
 ];
 
-const confidenceData = [
-  { x: 33, y: 0.72 }, { x: 35, y: 0.75 }, { x: 37, y: 0.73 }, { x: 39, y: 0.76 },
-  { x: 41, y: 0.74 }, { x: 43, y: 0.77 }, { x: 45, y: 0.75 }, { x: 47, y: 0.78 },
-  { x: 49, y: 0.76 }, { x: 50, y: 0.79 }
+// Loss curves — gap is now genuinely large (~0.17 by step 8,400)
+const trainingSteps = Array.from({ length: 84 }, (_, i) => {
+  const step = (i + 1) * 100;
+  const base = 0.9 * Math.exp(-step / 3500) + 0.15;
+  // Divergence starts step 4,000, accelerates: at step 8,400 gap ≈ 0.17
+  const divergenceStart = 4000;
+  const divergence = step > divergenceStart
+    ? Math.pow((step - divergenceStart) / 4400, 1.4) * 0.12
+    : 0;
+  return {
+    step,
+    loss: base + (Math.random() - 0.5) * 0.008,
+    evalLoss: base + 0.055 + divergence + (Math.random() - 0.5) * 0.012,
+  };
+});
+
+// Phase timing history — shows data-load regressed in last 30 steps
+const phaseTimingHistory = Array.from({ length: 100 }, (_, i) => {
+  const step = 8313 + i;
+  const dataDrift = i > 70 ? Math.pow((i - 70) / 30, 1.5) * 4 : 0;
+  return {
+    step,
+    data: 8 + dataDrift + (Math.random() - 0.5) * 0.7,
+    forward: 28 + (Math.random() - 0.5) * 1.4,
+    backward: 46 + (Math.random() - 0.5) * 1.6,
+    optimizer: 3 + (Math.random() - 0.5) * 0.3,
+  };
+});
+
+const alertStream = [
+  { id: 1, severity: 'warning', run: 'retrieval-encoder/ablation-4', step: 14100,
+    message: 'Gradient norm elevated', detail: 'Last 80 steps avg 2.1, baseline 0.9. Possible instability.',
+    timestamp: '14m ago', resolution: 'Reduce learning rate or enable gradient clipping',
+    actions: [{ id: 'reduce-lr', label: 'Reduce LR by 50%', icon: 'wrench' }, { id: 'investigate', label: 'Open run', icon: 'external' }] },
+  { id: 2, severity: 'info', run: 'code-gen-7b/pretrain-v3', step: 8000,
+    message: 'Checkpoint saved', detail: 'Checkpoint saved to s3://models/code-gen-7b/step-8000',
+    timestamp: '42m ago', resolution: null, actions: [] },
+  { id: 3, severity: 'critical', run: 'vision-base-3b/sft-r1', step: 3200,
+    message: 'NaN loss detected', detail: 'Training crashed at step 3200. Run terminated. Last healthy checkpoint: step 3100.',
+    timestamp: '6h ago', resolution: 'Restart from checkpoint step-3100 with lower LR',
+    actions: [{ id: 'restart', label: 'Restart from checkpoint', icon: 'rotate' }, { id: 'investigate', label: 'Open run', icon: 'external' }] },
+  { id: 4, severity: 'warning', run: 'code-gen-7b/pretrain-v3', step: 7600,
+    message: 'Throughput regression', detail: 'Tokens/sec dropped 8% sustained for 30 min. Node health check passed.',
+    timestamp: '8h ago', resolution: 'Investigate data pipeline — possible I/O contention',
+    actions: [{ id: 'investigate', label: 'Open run', icon: 'external' }] },
+  { id: 5, severity: 'info', run: 'vision-base-3b/sft-r2', step: 0,
+    message: 'Run started', detail: 'Training run initialized on 16 × H100, distributed ZeRO-3',
+    timestamp: '18h ago', resolution: null, actions: [] },
 ];
 
-const driftData = [
-  { x: 5, y: 0.3 }, { x: 5.2, y: 0.25 }, { x: 5.4, y: 0.35 }, { x: 5.6, y: 0.4 },
-  { x: 5.8, y: 0.45 }, { x: 6, y: 0.5 }, { x: 6.2, y: 0.35 }, { x: 6.4, y: 0.6 },
-  { x: 6.6, y: 0.45 }, { x: 6.8, y: 0.7 }, { x: 7, y: 0.55 }, { x: 7.2, y: 0.8 },
-  { x: 7.4, y: 0.65 }, { x: 7.6, y: 0.85 }, { x: 7.8, y: 0.75 }, { x: 8, y: 0.9 }
+// Initial log buffer — live stream appends to this
+const initialLogs = [
+  { id: 'l-init-7', ts: '14:32:15.234', level: 'error', rank: 0, run: 'retrieval-encoder', msg: 'Gradient norm 2.14 exceeded threshold 1.5 — reducing LR to 1.2e-4' },
+  { id: 'l-init-6', ts: '14:32:14.891', level: 'warn',  rank: 0, run: 'retrieval-encoder', msg: 'Feature distribution drift detected: embeddings KL=0.89 vs. epoch baseline' },
+  { id: 'l-init-5', ts: '14:32:12.456', level: 'info',  rank: 2, run: 'code-gen-7b',       msg: 'Forward pass completed: batch=64, seq_len=2048, time=28.1ms' },
+  { id: 'l-init-4', ts: '14:32:10.123', level: 'info',  rank: 0, run: 'code-gen-7b',       msg: 'Checkpoint health check passed (shard consistency verified)' },
+  { id: 'l-init-3', ts: '14:32:08.789', level: 'warn',  rank: 5, run: 'code-gen-7b',       msg: 'GPU 5 utilization 76% (expected ≥85%). Possible straggler.' },
+  { id: 'l-init-2', ts: '14:32:05.456', level: 'info',  rank: 0, run: 'vision-base-3b',    msg: 'Learning rate scheduled to 3.6e-4 (cosine schedule, step 2840)' },
+  { id: 'l-init-1', ts: '14:32:02.123', level: 'info',  rank: 3, run: 'code-gen-7b',       msg: 'Backward pass completed: gradient reduction 46.2ms, all-reduce 3.1ms' },
+  { id: 'l-init-0', ts: '14:31:58.891', level: 'info',  rank: 0, run: 'code-gen-7b',       msg: 'DataLoader prefetch queue: 4/4 batches buffered' },
 ];
 
-const trainingData = [
-  { step: 100, loss: 0.8, accuracy: 0.65, learningRate: 0.001, valLoss: 0.85, valAccuracy: 0.62, forwardTime: 35, backwardTime: 52, forwardMemory: 1.2, backwardMemory: 1.8, forwardGPU: 88, backwardGPU: 82 },
-  { step: 200, loss: 0.6, accuracy: 0.72, learningRate: 0.001, valLoss: 0.68, valAccuracy: 0.70, forwardTime: 33, backwardTime: 50, forwardMemory: 1.4, backwardMemory: 1.9, forwardGPU: 89, backwardGPU: 84 },
-  { step: 300, loss: 0.45, accuracy: 0.78, learningRate: 0.0008, valLoss: 0.52, valAccuracy: 0.75, forwardTime: 31, backwardTime: 48, forwardMemory: 1.5, backwardMemory: 2.0, forwardGPU: 90, backwardGPU: 85 },
-  { step: 400, loss: 0.35, accuracy: 0.83, learningRate: 0.0008, valLoss: 0.42, valAccuracy: 0.80, forwardTime: 30, backwardTime: 47, forwardMemory: 1.6, backwardMemory: 2.0, forwardGPU: 91, backwardGPU: 86 },
-  { step: 500, loss: 0.28, accuracy: 0.87, learningRate: 0.0006, valLoss: 0.35, valAccuracy: 0.84, forwardTime: 29, backwardTime: 46, forwardMemory: 1.7, backwardMemory: 2.1, forwardGPU: 91, backwardGPU: 87 },
-  { step: 600, loss: 0.22, accuracy: 0.89, learningRate: 0.0006, valLoss: 0.28, valAccuracy: 0.87, forwardTime: 28, backwardTime: 46, forwardMemory: 1.7, backwardMemory: 2.1, forwardGPU: 92, backwardGPU: 87 },
-  { step: 700, loss: 0.18, accuracy: 0.91, learningRate: 0.0004, valLoss: 0.24, valAccuracy: 0.88, forwardTime: 28, backwardTime: 46, forwardMemory: 1.8, backwardMemory: 2.1, forwardGPU: 92, backwardGPU: 88 },
-  { step: 800, loss: 0.15, accuracy: 0.92, learningRate: 0.0004, valLoss: 0.22, valAccuracy: 0.89, forwardTime: 28, backwardTime: 46, forwardMemory: 1.8, backwardMemory: 2.1, forwardGPU: 92, backwardGPU: 88 },
+// Pool of templates for live-stream synthesis
+const logTemplates = [
+  { level: 'info', run: 'code-gen-7b',       msg: () => `Forward pass completed: batch=64, seq_len=2048, time=${(27 + Math.random() * 2).toFixed(1)}ms` },
+  { level: 'info', run: 'code-gen-7b',       msg: () => `Backward pass completed: gradient reduction ${(45 + Math.random() * 2).toFixed(1)}ms, all-reduce ${(2.8 + Math.random() * 0.6).toFixed(1)}ms` },
+  { level: 'info', run: 'retrieval-encoder', msg: () => `Step ${14200 + Math.floor(Math.random() * 50)}: loss=${(0.085 + Math.random() * 0.01).toFixed(4)}, lr=1.2e-4` },
+  { level: 'warn', run: 'code-gen-7b',       msg: () => `GPU ${Math.floor(Math.random() * 8)} utilization ${(72 + Math.random() * 8).toFixed(0)}% (expected ≥85%). Possible straggler.` },
+  { level: 'info', run: 'vision-base-3b',    msg: () => `DataLoader prefetch queue: ${Math.floor(Math.random() * 5)}/4 batches buffered` },
+  { level: 'info', run: 'code-gen-7b',       msg: () => `All-reduce sync barrier completed in ${(2.9 + Math.random() * 0.4).toFixed(2)}ms` },
+  { level: 'warn', run: 'retrieval-encoder', msg: () => `Gradient norm ${(1.9 + Math.random() * 0.3).toFixed(2)} approaching threshold 1.5` },
+  { level: 'info', run: 'vision-base-3b',    msg: () => `Step ${2840 + Math.floor(Math.random() * 30)}: loss=${(0.41 + Math.random() * 0.02).toFixed(4)}` },
 ];
 
-// Enhanced Critical Alert Banner Component
-const CriticalAlertBanner = ({ alerts, onViewDetails, onDismiss }) => {
-  const criticalAlerts = alerts.filter(alert => alert.severity === 'High');
-  
-  if (criticalAlerts.length === 0) return null;
+const RANKS = [0, 1, 2, 3, 4, 5, 6, 7];
 
+const generateLogLine = () => {
+  const tpl = logTemplates[Math.floor(Math.random() * logTemplates.length)];
+  const now = new Date();
+  const ts = `${String(now.getUTCHours()).padStart(2, '0')}:${String(now.getUTCMinutes()).padStart(2, '0')}:${String(now.getUTCSeconds()).padStart(2, '0')}.${String(now.getUTCMilliseconds()).padStart(3, '0')}`;
+  return {
+    id: `l-${now.getTime()}-${Math.random().toString(36).slice(2, 8)}`,
+    ts,
+    level: tpl.level,
+    rank: RANKS[Math.floor(Math.random() * RANKS.length)],
+    run: tpl.run,
+    msg: tpl.msg(),
+  };
+};
+
+// KL trend per feature (last 24 hours, hourly)
+const klHistory = {
+  token_distribution:    Array.from({ length: 24 }, () => 0.10 + Math.random() * 0.05),
+  sequence_length:       Array.from({ length: 24 }, () => 0.30 + Math.random() * 0.08),
+  batch_class_balance:   Array.from({ length: 24 }, (_, i) => 0.32 + (i / 23) * 0.55 + Math.random() * 0.06),
+  attention_mask_density:Array.from({ length: 24 }, () => 0.04 + Math.random() * 0.02),
+  vocab_coverage:        Array.from({ length: 24 }, () => 0.16 + Math.random() * 0.04),
+  gradient_magnitude:    Array.from({ length: 24 }, (_, i) => i < 18 ? 0.4 + Math.random() * 0.1 : 0.4 + ((i - 17) / 6) * 0.85),
+};
+
+const dataIntegrityFeatures = [
+  { name: 'token_distribution',     domain: 'input',    kl: 0.12, psi: 0.08, js: 0.06, status: 'ok',       sampleCount: 2_450_000, note: 'Within baseline for current epoch.' },
+  { name: 'sequence_length',         domain: 'input',    kl: 0.34, psi: 0.22, js: 0.18, status: 'ok',       sampleCount: 2_450_000, note: 'Mild shift — expected after new shard.' },
+  { name: 'batch_class_balance',     domain: 'input',    kl: 0.89, psi: 0.71, js: 0.54, status: 'warning',  sampleCount: 2_450_000, note: 'Class 3 underrepresented this window. Check sampler weights.' },
+  { name: 'attention_mask_density',  domain: 'input',    kl: 0.05, psi: 0.03, js: 0.02, status: 'ok',       sampleCount: 2_450_000, note: 'Stable.' },
+  { name: 'vocab_coverage',          domain: 'input',    kl: 0.18, psi: 0.14, js: 0.11, status: 'ok',       sampleCount: 2_450_000, note: 'Stable.' },
+  { name: 'gradient_magnitude',      domain: 'training', kl: 1.24, psi: 0.98, js: 0.76, status: 'critical', sampleCount: 85_000,    note: 'Matches scheduled LR ramp at step 8,000 — confirm expected.' },
+];
+
+// Incidents per hour, by severity (now bars, not areas)
+const incidentData = Array.from({ length: 24 }, (_, i) => {
+  const bellCurve = Math.exp(-Math.pow((i - 14) / 5, 2));
+  return {
+    hour: `${i.toString().padStart(2, '0')}:00`,
+    critical: Math.max(0, Math.round(bellCurve * 1.2 + (Math.random() - 0.3) * 0.6)),
+    warning:  Math.max(0, Math.round(bellCurve * 2.5 + Math.random() * 1.2)),
+    info:     Math.max(0, Math.round(1.5 + Math.cos(i / 4) * 1.2 + Math.random())),
+  };
+});
+
+/* ═══════════════════════════════════════════════════════════════
+   DESIGN TOKENS
+   ─────────────────────────────────────────────────────────────── */
+
+const designTokens = `
+  @import url('https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700;800&family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+
+  :root {
+    --surface-base: #09090b;
+    --surface-raised: #0f0f11;
+    --surface-overlay: #15151a;
+    --surface-hover: #1c1c22;
+    --surface-active: #25252d;
+
+    --border-subtle: #1e1e24;
+    --border-default: #27272f;
+    --border-strong: #34343e;
+
+    --text-primary: #f4f4f5;
+    --text-secondary: #a1a1aa;
+    --text-tertiary: #71717a;
+    --text-disabled: #52525b;
+
+    --brand-300: #c4b5fd;
+    --brand-500: #8b5cf6;
+    --brand-600: #7c3aed;
+    --brand-700: #6d28d9;
+
+    --status-ok: #10b981;
+    --status-warn: #f59e0b;
+    --status-crit: #ef4444;
+    --status-info: #3b82f6;
+
+    --data-2: #06b6d4;
+
+    --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px;
+    --space-5: 20px; --space-6: 24px; --space-8: 32px; --space-10: 40px;
+
+    --radius-sm: 6px; --radius-md: 8px; --radius-lg: 12px; --radius-xl: 16px;
+
+    --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+    --dur-fast: 120ms; --dur-base: 200ms;
+
+    --font-display: 'Geist', -apple-system, sans-serif;
+    --font-ui: 'Inter', -apple-system, sans-serif;
+    --font-mono: 'JetBrains Mono', ui-monospace, monospace;
+
+    --focus-ring: 0 0 0 2px var(--surface-base), 0 0 0 4px var(--brand-500);
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body, .mp-root {
+    background: var(--surface-base);
+    color: var(--text-primary);
+    font-family: var(--font-ui);
+    font-feature-settings: 'cv11', 'ss01';
+    -webkit-font-smoothing: antialiased;
+    line-height: 1.5;
+    min-height: 100vh;
+  }
+
+  *:focus { outline: none; }
+  *:focus-visible { box-shadow: var(--focus-ring); border-radius: var(--radius-sm); }
+
+  /* ═══════ APP SHELL ═══════ */
+  .mp-app { display: grid; grid-template-columns: 240px 1fr; min-height: 100vh; }
+
+  .mp-sidebar {
+    background: var(--surface-raised);
+    border-right: 1px solid var(--border-default);
+    padding: var(--space-5) var(--space-3);
+    position: sticky;
+    top: 0;
+    height: 100vh;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+  }
+  .mp-brand {
+    padding: 0 var(--space-3) var(--space-5);
+    margin-bottom: var(--space-3);
+    border-bottom: 1px solid var(--border-subtle);
+  }
+  .mp-brand-name {
+    font-family: var(--font-display);
+    font-size: 20px; font-weight: 600; line-height: 1;
+    letter-spacing: -0.03em;
+    color: var(--text-primary);
+  }
+  .mp-brand-dot {
+    display: inline-block;
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: var(--brand-500);
+    margin-left: 2px;
+    vertical-align: 0.2em;
+  }
+  .mp-brand-meta {
+    font-family: var(--font-mono);
+    font-size: 9px;
+    color: var(--text-tertiary);
+    letter-spacing: 0.1em;
+    margin-top: 6px;
+    text-transform: uppercase;
+  }
+
+  /* Workspace switcher */
+  .mp-workspace {
+    margin: 0 0 var(--space-4);
+    padding: var(--space-3);
+    background: var(--surface-overlay);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-md);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    transition: border-color var(--dur-base) var(--ease-out);
+  }
+  .mp-workspace:hover { border-color: var(--border-strong); }
+  .mp-workspace-avatar {
+    width: 28px; height: 28px;
+    border-radius: var(--radius-sm);
+    background: linear-gradient(135deg, var(--brand-500), var(--brand-700));
+    display: flex; align-items: center; justify-content: center;
+    font-family: var(--font-mono);
+    font-size: 12px; font-weight: 700;
+    color: white;
+    flex-shrink: 0;
+  }
+  .mp-workspace-text {
+    display: flex; flex-direction: column;
+    flex: 1;
+    min-width: 0;
+  }
+  .mp-workspace-name {
+    font-size: 12px; font-weight: 600;
+    color: var(--text-primary);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .mp-workspace-team {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--text-tertiary);
+  }
+
+  .mp-nav { display: flex; flex-direction: column; gap: 1px; }
+  .mp-nav-item {
+    display: flex; align-items: center; gap: var(--space-3);
+    padding: var(--space-2) var(--space-3);
+    font-size: 13px; font-weight: 500;
+    color: var(--text-secondary);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    border: none; background: transparent;
+    width: 100%; text-align: left;
+    font-family: var(--font-ui);
+    position: relative;
+    transition: all var(--dur-base) var(--ease-out);
+  }
+  .mp-nav-item:hover { background: var(--surface-hover); color: var(--text-primary); }
+  .mp-nav-item.active { background: var(--surface-hover); color: var(--text-primary); }
+  .mp-nav-item.active::before {
+    content: '';
+    position: absolute;
+    left: -11px; top: 50%;
+    transform: translateY(-50%);
+    width: 2px; height: 16px;
+    background: var(--brand-500);
+    border-radius: 0 2px 2px 0;
+  }
+  .mp-nav-icon { width: 14px; height: 14px; color: var(--text-tertiary); flex-shrink: 0; }
+  .mp-nav-item.active .mp-nav-icon { color: var(--text-primary); }
+  .mp-nav-badge {
+    margin-left: auto;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    padding: 2px 6px;
+    background: var(--status-crit);
+    color: white;
+    border-radius: 4px;
+    font-weight: 600;
+  }
+  .mp-nav-section-label {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--text-tertiary);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    padding: var(--space-5) var(--space-3) var(--space-2);
+  }
+
+  /* Sidebar footer */
+  .mp-sidebar-footer {
+    margin-top: auto;
+    padding-top: var(--space-4);
+    border-top: 1px solid var(--border-subtle);
+    display: flex; flex-direction: column;
+    gap: 1px;
+  }
+  .mp-sidebar-user {
+    display: flex; align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-3);
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    transition: background var(--dur-base) var(--ease-out);
+  }
+  .mp-sidebar-user:hover { background: var(--surface-hover); }
+  .mp-sidebar-user-avatar {
+    width: 24px; height: 24px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, #f59e0b, #ef4444);
+    display: flex; align-items: center; justify-content: center;
+    font-family: var(--font-mono);
+    font-size: 10px; font-weight: 700;
+    color: white;
+    flex-shrink: 0;
+  }
+  .mp-sidebar-user-text { flex: 1; min-width: 0; }
+  .mp-sidebar-user-name {
+    font-size: 12px; font-weight: 500;
+    color: var(--text-primary);
+  }
+  .mp-sidebar-user-role {
+    font-family: var(--font-mono);
+    font-size: 9px;
+    color: var(--text-tertiary);
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+
+  .mp-main { padding: var(--space-8); overflow: hidden; min-width: 0; }
+
+  /* ═══════ PAGE HEADER ═══════ */
+  .mp-page-header {
+    margin-bottom: var(--space-6);
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: var(--space-5);
+  }
+  .mp-page-header-text { display: flex; flex-direction: column; gap: var(--space-2); }
+  .mp-page-title {
+    font-family: var(--font-display);
+    font-size: 30px; font-weight: 500; line-height: 1;
+    letter-spacing: -0.03em;
+    color: var(--text-primary);
+  }
+  .mp-page-sub { font-size: 13px; color: var(--text-secondary); }
+
+  /* Time / freshness disclosure */
+  .mp-meta-strip {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    flex-wrap: wrap;
+  }
+  .mp-meta-chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 4px var(--space-3);
+    background: var(--surface-raised);
+    border: 1px solid var(--border-default);
+    border-radius: 100px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--text-secondary);
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    font-weight: 500;
+  }
+  .mp-meta-chip.live { color: var(--status-ok); border-color: rgba(16, 185, 129, 0.25); }
+  .mp-meta-chip.live .mp-meta-pulse {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--status-ok);
+    animation: pulse-soft 2s ease-in-out infinite;
+  }
+  .mp-meta-chip.stale { color: var(--status-warn); border-color: rgba(245, 158, 11, 0.25); }
+  .mp-meta-chip.disconnected { color: var(--status-crit); border-color: rgba(239, 68, 68, 0.25); }
+
+  /* ═══════ PANEL ═══════ */
+  .mp-panel {
+    background: var(--surface-raised);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-lg);
+    padding: var(--space-6);
+    margin-bottom: var(--space-4);
+  }
+  .mp-panel.hero { padding: var(--space-8); }
+  .mp-panel-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    margin-bottom: var(--space-5);
+    gap: var(--space-5);
+  }
+  .mp-panel-title-block { display: flex; flex-direction: column; gap: 2px; }
+  .mp-panel-title {
+    font-family: var(--font-display);
+    font-size: 18px; font-weight: 500; line-height: 1.1;
+    letter-spacing: -0.02em;
+    color: var(--text-primary);
+  }
+  .mp-panel-desc { font-size: 12px; color: var(--text-secondary); }
+
+  /* ═══════ STAT CELL ═══════ */
+  .mp-stat-row {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: var(--space-3);
+    margin-bottom: var(--space-4);
+  }
+  .mp-stat-cell {
+    padding: var(--space-5);
+    background: var(--surface-raised);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-lg);
+    display: flex; flex-direction: column; gap: var(--space-2);
+    transition: border-color var(--dur-base) var(--ease-out);
+  }
+  .mp-stat-cell:hover { border-color: var(--border-strong); }
+  .mp-stat-lbl {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--text-tertiary);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    display: flex; align-items: center; gap: var(--space-2);
+  }
+  .mp-stat-val {
+    font-family: var(--font-mono);
+    font-size: 28px; font-weight: 500; line-height: 1;
+    color: var(--text-primary);
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.02em;
+  }
+  .mp-stat-val .unit { font-size: 16px; color: var(--text-tertiary); margin-left: 2px; font-weight: 400; }
+  .mp-stat-detail {
+    font-family: var(--font-mono);
+    font-size: 10px; color: var(--text-tertiary); line-height: 1.5;
+  }
+  .mp-stat-delta { font-family: var(--font-mono); font-size: 11px; font-weight: 500; }
+  .mp-stat-delta.up { color: var(--status-ok); }
+  .mp-stat-delta.down { color: var(--status-crit); }
+  .mp-stat-delta.neutral { color: var(--text-tertiary); }
+
+  /* Skeleton */
+  .mp-skeleton {
+    background: linear-gradient(90deg, var(--surface-active) 0%, var(--surface-hover) 50%, var(--surface-active) 100%);
+    background-size: 200% 100%;
+    border-radius: var(--radius-sm);
+    animation: shimmer 1.4s ease-in-out infinite;
+  }
+  @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+
+  /* ═══════ HEALTH PILL ═══════ */
+  .mp-health-pill {
+    display: inline-flex; align-items: center;
+    gap: var(--space-2);
+    padding: 5px 10px 5px 8px;
+    border-radius: 100px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    white-space: nowrap;
+  }
+  .mp-health-pill.healthy { background: rgba(16, 185, 129, 0.08); border: 1px solid rgba(16, 185, 129, 0.25); color: var(--status-ok); }
+  .mp-health-pill.attention { background: rgba(245, 158, 11, 0.08); border: 1px solid rgba(245, 158, 11, 0.25); color: var(--status-warn); }
+  .mp-health-pill.critical { background: rgba(239, 68, 68, 0.08); border: 1px solid rgba(239, 68, 68, 0.25); color: var(--status-crit); }
+  .mp-health-pill.completed { background: rgba(59, 130, 246, 0.08); border: 1px solid rgba(59, 130, 246, 0.25); color: var(--status-info); }
+  .mp-health-pill.failed { background: rgba(239, 68, 68, 0.08); border: 1px solid rgba(239, 68, 68, 0.25); color: var(--status-crit); }
+  .mp-health-pill.cancelled { background: var(--surface-overlay); border: 1px solid var(--border-default); color: var(--text-tertiary); }
+  .mp-health-pill-icon { width: 12px; height: 12px; flex-shrink: 0; }
+  .mp-health-pill.healthy .mp-health-pill-icon { animation: pulse-soft 3s ease-in-out infinite; }
+  .mp-health-pill.critical .mp-health-pill-icon { animation: pulse-soft 1.2s ease-in-out infinite; }
+  @keyframes pulse-soft { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } }
+
+  /* ═══════ RUN STRIP ═══════ */
+  .mp-run-strip {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: var(--space-5) var(--space-6);
+    background: var(--surface-raised);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-lg);
+    margin-bottom: var(--space-5);
+    gap: var(--space-6);
+  }
+  .mp-run-strip-left { display: flex; align-items: center; gap: var(--space-5); }
+  .mp-run-name-block { display: flex; flex-direction: column; gap: 2px; }
+  .mp-run-name {
+    font-family: var(--font-mono);
+    font-size: 14px; font-weight: 600;
+    color: var(--text-primary);
+    letter-spacing: -0.01em;
+  }
+  .mp-run-config { font-family: var(--font-mono); font-size: 11px; color: var(--text-tertiary); }
+  .mp-run-reason {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--status-warn);
+    margin-top: 4px;
+    display: flex; align-items: center; gap: 6px;
+  }
+  .mp-run-strip-right { display: flex; gap: var(--space-8); }
+  .mp-run-strip-stat { display: flex; flex-direction: column; gap: var(--space-2); }
+  .mp-run-strip-stat-val {
+    font-family: var(--font-mono);
+    font-size: 14px; font-weight: 500;
+    color: var(--text-primary);
+    font-variant-numeric: tabular-nums;
+  }
+  .mp-run-strip-stat-secondary {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--text-tertiary);
+    margin-top: 2px;
+  }
+
+  /* ═══════ STEP ANATOMY ═══════ */
+  .mp-anatomy-bar {
+    display: flex;
+    height: 60px;
+    border-radius: var(--radius-sm);
+    overflow: hidden;
+    margin-bottom: var(--space-3);
+  }
+  .mp-anatomy-seg {
+    display: flex; flex-direction: column; justify-content: center; align-items: center;
+    padding: var(--space-2);
+    transition: filter var(--dur-base) var(--ease-out);
+    cursor: pointer;
+    min-width: 40px;
+  }
+  .mp-anatomy-seg:hover { filter: brightness(1.15); }
+  .mp-anatomy-seg.data { background: #3f3f46; }
+  .mp-anatomy-seg.fwd  { background: var(--brand-700); }
+  .mp-anatomy-seg.bwd  { background: var(--brand-500); }
+  .mp-anatomy-seg.opt  { background: var(--data-2); }
+  .mp-aseg-lbl {
+    font-family: var(--font-mono);
+    font-size: 10px; font-weight: 500;
+    color: rgba(255, 255, 255, 0.85);
+    letter-spacing: 0.08em; text-transform: uppercase;
+  }
+  .mp-aseg-val {
+    font-family: var(--font-mono);
+    font-size: 12px; font-weight: 600;
+    color: #fff; margin-top: 2px;
+    font-variant-numeric: tabular-nums;
+  }
+  .mp-anatomy-ticks { position: relative; height: 18px; margin-bottom: var(--space-5); }
+  .mp-anatomy-tick {
+    position: absolute; top: 0;
+    display: flex; flex-direction: column; align-items: center;
+    transform: translateX(-50%);
+  }
+  .mp-anatomy-tick-mark { width: 1px; height: 4px; background: var(--border-strong); }
+  .mp-anatomy-tick-lbl {
+    font-family: var(--font-mono);
+    font-size: 10px; color: var(--text-tertiary);
+    margin-top: 2px; font-variant-numeric: tabular-nums;
+  }
+  .mp-anatomy-legend {
+    display: flex; flex-wrap: wrap; gap: var(--space-5);
+    padding-top: var(--space-4);
+    border-top: 1px solid var(--border-subtle);
+  }
+  .mp-alegend-item { display: flex; align-items: center; gap: var(--space-2); }
+  .mp-alegend-dot { width: 8px; height: 8px; border-radius: 2px; }
+  .mp-alegend-dot.data { background: #3f3f46; }
+  .mp-alegend-dot.fwd { background: var(--brand-700); }
+  .mp-alegend-dot.bwd { background: var(--brand-500); }
+  .mp-alegend-dot.opt { background: var(--data-2); }
+  .mp-alegend-name { font-size: 12px; color: var(--text-secondary); font-weight: 500; }
+  .mp-alegend-pct {
+    font-family: var(--font-mono);
+    font-size: 11px; color: var(--text-tertiary);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* ═══════ CHART WRAP ═══════ */
+  .mp-chart-wrap {
+    background: var(--surface-base);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+    padding: var(--space-5);
+    margin-bottom: var(--space-3);
+  }
+  .mp-chart-legend {
+    display: flex; align-items: center;
+    gap: var(--space-5);
+    flex-wrap: wrap;
+  }
+  .mp-chart-legend-chip {
+    display: inline-flex; align-items: center; gap: var(--space-2);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-secondary); font-weight: 500;
+  }
+  .mp-chart-legend-line { width: 16px; height: 2px; border-radius: 1px; }
+  .mp-chart-legend-line.solid { background: var(--brand-500); }
+  .mp-chart-legend-line.dashed { background: repeating-linear-gradient(90deg, var(--data-2) 0 4px, transparent 4px 8px); }
+  .mp-chart-legend-line.ok { background: var(--status-ok); }
+  .mp-chart-legend-line.warn { background: var(--status-warn); }
+  .mp-chart-legend-line.crit { background: var(--status-crit); }
+  .mp-chart-legend-line.info-color { background: var(--status-info); }
+  .mp-chart-legend-line.data-clr { background: #71717a; }
+  .mp-chart-legend-line.fwd-clr { background: var(--brand-700); }
+  .mp-chart-legend-line.bwd-clr { background: var(--brand-500); }
+  .mp-chart-legend-line.opt-clr { background: var(--data-2); }
+  .mp-chart-legend-val {
+    font-family: var(--font-mono);
+    font-size: 11px; font-weight: 600;
+    color: var(--text-primary);
+    font-variant-numeric: tabular-nums;
+  }
+  .mp-chart-legend-delta {
+    margin-left: auto;
+    font-family: var(--font-mono);
+    font-size: 11px; color: var(--text-tertiary);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .mp-tip {
+    background: var(--surface-overlay);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    padding: var(--space-3) var(--space-4);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+    min-width: 140px;
+  }
+  .mp-tip-ts {
+    font-size: 10px;
+    color: var(--text-tertiary);
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    margin-bottom: 6px;
+  }
+  .mp-tip-row {
+    display: flex; justify-content: space-between; gap: var(--space-4);
+    align-items: baseline; padding: 2px 0;
+  }
+  .mp-tip-name { color: var(--text-secondary); display: inline-flex; align-items: center; gap: 6px; }
+  .mp-tip-dot { width: 8px; height: 8px; border-radius: 2px; }
+  .mp-tip-val {
+    color: var(--text-primary); font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* ═══════ HEALTH GRID ═══════ */
+  .mp-health-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: var(--space-3);
+  }
+  .mp-health-cell {
+    padding: var(--space-5);
+    background: var(--surface-base);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md);
+    display: flex; flex-direction: column; gap: var(--space-2);
+    position: relative;
+  }
+  .mp-health-cell::before {
+    content: ''; position: absolute;
+    left: 0; top: 16px; bottom: 16px;
+    width: 2px; border-radius: 0 2px 2px 0;
+  }
+  .mp-health-cell.ok::before { background: var(--status-ok); }
+  .mp-health-cell.warn::before { background: var(--status-warn); }
+  .mp-health-cell.crit::before { background: var(--status-crit); }
+
+  /* ═══════ RUN ROW ═══════ */
+  .mp-run-row {
+    display: grid;
+    grid-template-columns: auto 2fr 1fr 1fr 1fr auto;
+    align-items: center;
+    padding: var(--space-4) var(--space-5);
+    background: var(--surface-raised);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-md);
+    margin-bottom: var(--space-2);
+    gap: var(--space-5);
+    cursor: pointer;
+    transition: border-color var(--dur-base) var(--ease-out);
+  }
+  .mp-run-row:hover { border-color: var(--border-strong); }
+  .mp-run-row-name { display: flex; flex-direction: column; gap: 2px; }
+  .mp-run-row-title { font-family: var(--font-mono); font-size: 13px; font-weight: 600; color: var(--text-primary); }
+  .mp-run-row-config { font-family: var(--font-mono); font-size: 10px; color: var(--text-tertiary); }
+  .mp-run-row-progress { display: flex; flex-direction: column; gap: 4px; }
+  .mp-run-row-progress-bar { height: 3px; background: var(--surface-active); border-radius: 2px; overflow: hidden; }
+  .mp-run-row-progress-fill { height: 100%; background: var(--brand-500); border-radius: 2px; }
+  .mp-run-row-progress-fill.failed { background: var(--status-crit); }
+  .mp-run-row-progress-fill.cancelled { background: var(--text-disabled); }
+  .mp-run-row-progress-fill.completed { background: var(--status-info); }
+  .mp-run-row-stat {
+    font-family: var(--font-mono);
+    font-size: 11px; color: var(--text-secondary);
+    display: flex; flex-direction: column; gap: 1px;
+  }
+  .mp-run-row-stat-val { color: var(--text-primary); font-weight: 600; font-variant-numeric: tabular-nums; }
+
+  /* ═══════ ALERT ROW ═══════ */
+  .mp-alert-row {
+    display: grid;
+    grid-template-columns: auto 1fr auto auto;
+    align-items: flex-start;
+    gap: var(--space-5);
+    padding: var(--space-5);
+    background: var(--surface-raised);
+    border: 1px solid var(--border-default);
+    border-left: 3px solid var(--border-default);
+    border-radius: var(--radius-md);
+    margin-bottom: var(--space-2);
+  }
+  .mp-alert-row.critical { border-left-color: var(--status-crit); }
+  .mp-alert-row.warning { border-left-color: var(--status-warn); }
+  .mp-alert-row.info { border-left-color: var(--status-info); }
+  .mp-alert-icon {
+    width: 32px; height: 32px;
+    display: flex; align-items: center; justify-content: center;
+    border-radius: var(--radius-sm);
+    flex-shrink: 0;
+  }
+  .mp-alert-row.critical .mp-alert-icon { background: rgba(239, 68, 68, 0.1); color: var(--status-crit); }
+  .mp-alert-row.warning .mp-alert-icon { background: rgba(245, 158, 11, 0.1); color: var(--status-warn); }
+  .mp-alert-row.info .mp-alert-icon { background: rgba(59, 130, 246, 0.1); color: var(--status-info); }
+  .mp-alert-body { display: flex; flex-direction: column; gap: 4px; }
+  .mp-alert-title { font-size: 14px; font-weight: 600; color: var(--text-primary); }
+  .mp-alert-detail { font-size: 12px; color: var(--text-secondary); line-height: 1.5; }
+  .mp-alert-resolution {
+    margin-top: var(--space-2);
+    padding: var(--space-3);
+    background: var(--surface-base);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+    font-size: 12px;
+    color: var(--text-secondary);
+    display: flex; flex-direction: column; gap: var(--space-3);
+  }
+  .mp-alert-resolution-text { display: flex; gap: var(--space-2); align-items: flex-start; }
+  .mp-alert-resolution-text strong {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--text-tertiary);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 600;
+    flex-shrink: 0;
+    min-width: 56px;
+    margin-top: 2px;
+  }
+  .mp-alert-actions { display: flex; gap: var(--space-2); flex-wrap: wrap; }
+  .mp-alert-meta {
+    display: flex; flex-direction: column; align-items: flex-end;
+    gap: 4px;
+    font-family: var(--font-mono);
+    font-size: 10px; color: var(--text-tertiary);
+    white-space: nowrap;
+  }
+  .mp-alert-meta-run { color: var(--text-secondary); font-weight: 600; }
+
+  /* Empty state */
+  .mp-empty {
+    padding: var(--space-10) var(--space-5);
+    text-align: center;
+    background: var(--surface-raised);
+    border: 1px dashed var(--border-default);
+    border-radius: var(--radius-md);
+    color: var(--text-tertiary);
+    font-size: 13px;
+  }
+  .mp-empty-mono { font-family: var(--font-mono); font-size: 11px; margin-top: 4px; }
+
+  /* ═══════ LOG STREAM ═══════ */
+  .mp-log-toolbar {
+    display: flex; align-items: center;
+    gap: var(--space-2);
+    margin-bottom: var(--space-3);
+    padding: var(--space-3) var(--space-4);
+    background: var(--surface-raised);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-md);
+  }
+  .mp-log-toolbar-spacer { flex: 1; }
+  .mp-log-stream {
+    background: var(--surface-base);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-md);
+    overflow: hidden;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    max-height: 560px;
+    overflow-y: auto;
+    position: relative;
+  }
+  .mp-log-stream-header,
+  .mp-log-row {
+    display: grid;
+    grid-template-columns: 100px 50px 40px 140px 1fr;
+    padding: 7px var(--space-4);
+    gap: var(--space-3);
+    align-items: baseline;
+    border-bottom: 1px solid var(--border-subtle);
+  }
+  .mp-log-stream-header {
+    background: var(--surface-base);
+    border-bottom: 1px solid var(--border-default);
+    position: sticky; top: 0; z-index: 1;
+    font-size: 10px;
+    color: var(--text-tertiary);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 600;
+  }
+  .mp-log-row {
+    color: var(--text-secondary);
+    transition: background var(--dur-fast) var(--ease-out);
+  }
+  .mp-log-row:hover { background: var(--surface-hover); }
+  .mp-log-row:last-child { border-bottom: none; }
+  .mp-log-row.fresh {
+    animation: log-flash var(--dur-base) var(--ease-out);
+  }
+  @keyframes log-flash {
+    0% { background: rgba(139, 92, 246, 0.15); }
+    100% { background: transparent; }
+  }
+  .mp-log-ts { color: var(--text-tertiary); font-size: 11px; }
+  .mp-log-level {
+    text-align: center;
+    font-size: 10px; font-weight: 700;
+    letter-spacing: 0.05em;
+    padding: 2px 4px;
+    border-radius: 3px;
+  }
+  .mp-log-level.info { color: var(--text-tertiary); }
+  .mp-log-level.warn { color: var(--status-warn); background: rgba(245, 158, 11, 0.08); }
+  .mp-log-level.error { color: var(--status-crit); background: rgba(239, 68, 68, 0.08); }
+  .mp-log-rank { color: var(--text-tertiary); font-size: 11px; }
+  .mp-log-run { color: var(--text-primary); font-weight: 500; font-size: 11px; }
+  .mp-log-msg { color: var(--text-secondary); font-size: 12px; line-height: 1.5; }
+
+  /* ═══════ FEATURE TABLE ═══════ */
+  .mp-feature-table {
+    background: var(--surface-raised);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+  }
+  .mp-feature-table-header,
+  .mp-feature-row-head {
+    display: grid;
+    grid-template-columns: 2fr 1fr 1.2fr 90px 1fr auto auto;
+    align-items: center;
+    padding: var(--space-4) var(--space-5);
+    gap: var(--space-4);
+  }
+  .mp-feature-table-header {
+    background: var(--surface-base);
+    border-bottom: 1px solid var(--border-default);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--text-tertiary);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    font-weight: 600;
+  }
+  .mp-feature-row { border-bottom: 1px solid var(--border-subtle); }
+  .mp-feature-row:last-child { border-bottom: none; }
+  .mp-feature-row-head { cursor: pointer; transition: background var(--dur-fast) var(--ease-out); }
+  .mp-feature-row-head:hover { background: var(--surface-hover); }
+  .mp-feature-row-expand {
+    padding: var(--space-4) var(--space-5) var(--space-5) calc(var(--space-5) + var(--space-4));
+    background: var(--surface-base);
+    border-top: 1px solid var(--border-subtle);
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: var(--space-5);
+  }
+  .mp-feature-expand-item { display: flex; flex-direction: column; gap: 4px; }
+  .mp-feature-expand-lbl {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--text-tertiary);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  .mp-feature-expand-val {
+    font-family: var(--font-mono);
+    font-size: 14px; font-weight: 500;
+    color: var(--text-primary);
+    font-variant-numeric: tabular-nums;
+  }
+  .mp-feature-expand-note {
+    font-size: 12px; color: var(--text-secondary);
+    line-height: 1.5;
+    grid-column: 1 / -1;
+    margin-top: var(--space-2);
+    padding-top: var(--space-3);
+    border-top: 1px solid var(--border-subtle);
+  }
+  .mp-feature-name { font-family: var(--font-mono); font-size: 13px; color: var(--text-primary); font-weight: 500; }
+  .mp-feature-domain {
+    font-family: var(--font-mono);
+    font-size: 10px; color: var(--text-tertiary);
+    text-transform: uppercase; letter-spacing: 0.08em;
+  }
+  .mp-feature-kl-cell {
+    display: flex; align-items: center; gap: var(--space-3);
+  }
+  .mp-feature-kl-bar {
+    flex: 1;
+    height: 4px;
+    background: var(--surface-active);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+  .mp-feature-kl-fill {
+    height: 100%; border-radius: 2px;
+    transition: width var(--dur-base) var(--ease-out);
+  }
+  .mp-feature-kl-fill.ok { background: var(--status-ok); }
+  .mp-feature-kl-fill.warn { background: var(--status-warn); }
+  .mp-feature-kl-fill.crit { background: var(--status-crit); }
+  .mp-feature-stat {
+    font-family: var(--font-mono);
+    font-size: 13px; color: var(--text-primary);
+    font-variant-numeric: tabular-nums;
+    min-width: 42px;
+    text-align: right;
+  }
+  .mp-feature-stat.high { color: var(--status-warn); }
+  .mp-feature-stat.critical { color: var(--status-crit); }
+  .mp-feature-status { width: 8px; height: 8px; border-radius: 50%; }
+  .mp-feature-status.ok { background: var(--status-ok); }
+  .mp-feature-status.warning { background: var(--status-warn); }
+  .mp-feature-status.critical { background: var(--status-crit); }
+  .mp-feature-chevron {
+    color: var(--text-tertiary);
+    transition: transform var(--dur-base) var(--ease-out);
+  }
+  .mp-feature-chevron.open { transform: rotate(90deg); }
+  .mp-feature-spark { height: 24px; }
+
+  /* ═══════ BUTTONS ═══════ */
+  .mp-btn {
+    display: inline-flex; align-items: center; gap: var(--space-2);
+    padding: var(--space-2) var(--space-4);
+    background: var(--surface-hover);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    font-family: var(--font-ui);
+    font-size: 12px; font-weight: 500;
+    cursor: pointer;
+    transition: all var(--dur-base) var(--ease-out);
+  }
+  .mp-btn:hover { background: var(--surface-active); border-color: var(--border-strong); }
+  .mp-btn.ghost { background: transparent; }
+  .mp-btn.sm { padding: 5px var(--space-3); font-size: 11px; }
+  .mp-btn.success-flash {
+    background: rgba(16, 185, 129, 0.15);
+    border-color: rgba(16, 185, 129, 0.4);
+    color: var(--status-ok);
+  }
+
+  /* ═══════ FILTER BAR ═══════ */
+  .mp-filter-bar {
+    display: flex; gap: var(--space-2);
+    margin-bottom: var(--space-4);
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  .mp-filter-input {
+    flex: 1;
+    min-width: 240px;
+    display: flex; align-items: center; gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    background: var(--surface-raised);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-sm);
+    color: var(--text-tertiary);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    transition: border-color var(--dur-base) var(--ease-out);
+  }
+  .mp-filter-input:focus-within { border-color: var(--brand-500); box-shadow: none; }
+  .mp-filter-input input {
+    background: transparent; border: none; outline: none;
+    color: var(--text-primary);
+    font-family: inherit; font-size: inherit;
+    flex: 1;
+    min-width: 0;
+  }
+  .mp-filter-input input::placeholder { color: var(--text-tertiary); }
+  .mp-filter-count {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--text-tertiary);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  .mp-filter-group {
+    display: flex; gap: 2px;
+    background: var(--surface-raised);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-sm);
+    padding: 2px;
+  }
+  .mp-filter-chip {
+    padding: 4px var(--space-3);
+    border-radius: 4px;
+    font-family: var(--font-mono);
+    font-size: 10px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.06em;
+    color: var(--text-tertiary);
+    cursor: pointer;
+    border: none; background: transparent;
+    transition: all var(--dur-fast) var(--ease-out);
+    white-space: nowrap;
+  }
+  .mp-filter-chip.active { background: var(--surface-hover); color: var(--text-primary); }
+
+  /* ═══════ INSIGHT ROW ═══════ */
+  .mp-insight-row {
+    display: flex; align-items: center; gap: var(--space-3);
+    font-size: 13px; color: var(--text-secondary);
+    margin-top: var(--space-3);
+  }
+  .mp-insight-icon.ok { color: var(--status-ok); }
+  .mp-insight-icon.warn { color: var(--status-warn); }
+  .mp-insight-icon.crit { color: var(--status-crit); }
+
+  /* Phase tabs */
+  .mp-phase-tabs {
+    display: flex; gap: 2px;
+    background: var(--surface-base);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-sm);
+    padding: 2px; margin-bottom: var(--space-4);
+    width: fit-content;
+  }
+  .mp-phase-tab {
+    padding: 6px 14px;
+    border-radius: 4px;
+    border: none;
+    background: transparent;
+    color: var(--text-tertiary);
+    font-family: var(--font-mono);
+    font-size: 11px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.06em;
+    cursor: pointer;
+    transition: all var(--dur-fast) var(--ease-out);
+  }
+  .mp-phase-tab.active { background: var(--surface-hover); color: var(--text-primary); }
+  .mp-phase-card {
+    padding: var(--space-4);
+    background: var(--surface-base);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+  }
+  .mp-phase-card-lbl {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--brand-300);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 8px;
+  }
+  .mp-phase-card-val {
+    font-family: var(--font-mono);
+    font-size: 20px; font-weight: 500;
+    color: var(--text-primary);
+    margin-bottom: 12px;
+    font-variant-numeric: tabular-nums;
+  }
+  .mp-phase-card-note {
+    font-size: 11px; color: var(--text-secondary); line-height: 1.6;
+    font-family: var(--font-mono);
+  }
+
+  /* Toast */
+  .mp-toast {
+    position: fixed;
+    bottom: var(--space-6);
+    right: var(--space-6);
+    background: var(--surface-overlay);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-md);
+    padding: var(--space-3) var(--space-4);
+    display: flex; align-items: center; gap: var(--space-3);
+    box-shadow: 0 12px 32px rgba(0,0,0,0.5);
+    z-index: 100;
+    font-size: 12px;
+    color: var(--text-primary);
+    animation: toast-in 200ms var(--ease-out);
+    max-width: 360px;
+  }
+  .mp-toast-icon { color: var(--status-ok); flex-shrink: 0; }
+  @keyframes toast-in {
+    from { transform: translateY(8px); opacity: 0; }
+    to { transform: translateY(0); opacity: 1; }
+  }
+
+  /* ═══════ WORKSPACE POPOVER ═══════ */
+  .mp-ws-host { position: relative; margin: 0 0 var(--space-4); }
+  .mp-ws-popover {
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 0;
+    right: 0;
+    background: var(--surface-overlay);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-md);
+    padding: 6px;
+    box-shadow: 0 16px 40px rgba(0,0,0,0.6), 0 0 0 1px rgba(255,255,255,0.02);
+    z-index: 50;
+    animation: ws-pop 160ms var(--ease-out);
+  }
+  @keyframes ws-pop {
+    from { transform: translateY(-4px); opacity: 0; }
+    to { transform: translateY(0); opacity: 1; }
+  }
+  .mp-ws-popover-label {
+    font-family: var(--font-mono);
+    font-size: 9px;
+    color: var(--text-tertiary);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    padding: var(--space-2) var(--space-3) var(--space-1);
+  }
+  .mp-ws-item {
+    display: flex; align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-2) var(--space-3);
+    border: none;
+    background: transparent;
+    width: 100%;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    transition: background var(--dur-fast) var(--ease-out);
+    text-align: left;
+  }
+  .mp-ws-item:hover { background: var(--surface-hover); }
+  .mp-ws-item-avatar {
+    width: 26px; height: 26px;
+    border-radius: var(--radius-sm);
+    display: flex; align-items: center; justify-content: center;
+    font-family: var(--font-mono);
+    font-size: 11px; font-weight: 700;
+    color: white;
+    flex-shrink: 0;
+  }
+  .mp-ws-item-text { flex: 1; min-width: 0; }
+  .mp-ws-item-name {
+    font-size: 12px; font-weight: 600;
+    color: var(--text-primary);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .mp-ws-item-team {
+    font-family: var(--font-mono);
+    font-size: 9px;
+    color: var(--text-tertiary);
+    letter-spacing: 0.04em;
+  }
+  .mp-ws-item-runs {
+    font-family: var(--font-mono);
+    font-size: 9px;
+    color: var(--text-tertiary);
+    padding: 2px 6px;
+    background: var(--surface-active);
+    border-radius: 4px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+  .mp-ws-item-check { color: var(--brand-500); flex-shrink: 0; }
+  .mp-ws-divider {
+    height: 1px;
+    background: var(--border-subtle);
+    margin: 4px 0;
+  }
+  .mp-ws-item.muted .mp-ws-item-name { color: var(--text-secondary); font-weight: 500; }
+
+  /* ═══════ SETTINGS ═══════ */
+  .mp-settings-shell {
+    display: grid;
+    grid-template-columns: 200px 1fr;
+    gap: var(--space-6);
+    align-items: flex-start;
+  }
+  .mp-settings-nav {
+    background: var(--surface-raised);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-lg);
+    padding: var(--space-3);
+    position: sticky;
+    top: var(--space-8);
+  }
+  .mp-settings-nav-item {
+    display: flex; align-items: center; gap: var(--space-3);
+    padding: var(--space-2) var(--space-3);
+    border: none;
+    background: transparent;
+    width: 100%;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    color: var(--text-secondary);
+    font-family: var(--font-ui);
+    font-size: 13px;
+    font-weight: 500;
+    text-align: left;
+    transition: all var(--dur-fast) var(--ease-out);
+  }
+  .mp-settings-nav-item:hover { background: var(--surface-hover); color: var(--text-primary); }
+  .mp-settings-nav-item.active { background: var(--surface-hover); color: var(--text-primary); }
+
+  .mp-settings-section { display: flex; flex-direction: column; gap: var(--space-4); }
+  .mp-form-row {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    align-items: center;
+    gap: var(--space-5);
+    padding: var(--space-4) 0;
+    border-bottom: 1px solid var(--border-subtle);
+  }
+  .mp-form-row:last-child { border-bottom: none; }
+  .mp-form-label-block { display: flex; flex-direction: column; gap: 4px; }
+  .mp-form-label {
+    font-size: 13px; font-weight: 500;
+    color: var(--text-primary);
+  }
+  .mp-form-help {
+    font-size: 12px; color: var(--text-secondary);
+    line-height: 1.5;
+  }
+
+  /* Toggle */
+  .mp-toggle {
+    width: 36px; height: 20px;
+    background: var(--surface-active);
+    border: 1px solid var(--border-default);
+    border-radius: 100px;
+    position: relative;
+    cursor: pointer;
+    transition: all var(--dur-base) var(--ease-out);
+    flex-shrink: 0;
+    padding: 0;
+  }
+  .mp-toggle::after {
+    content: '';
+    position: absolute;
+    top: 1px; left: 1px;
+    width: 16px; height: 16px;
+    background: var(--text-secondary);
+    border-radius: 50%;
+    transition: all var(--dur-base) var(--ease-out);
+  }
+  .mp-toggle.on {
+    background: var(--brand-500);
+    border-color: var(--brand-500);
+  }
+  .mp-toggle.on::after {
+    left: 17px;
+    background: white;
+  }
+
+  /* Segmented control */
+  .mp-seg {
+    display: flex; gap: 2px;
+    background: var(--surface-base);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-sm);
+    padding: 2px;
+    flex-shrink: 0;
+  }
+  .mp-seg-btn {
+    padding: 5px 12px;
+    border-radius: 4px;
+    border: none;
+    background: transparent;
+    color: var(--text-tertiary);
+    font-family: var(--font-mono);
+    font-size: 11px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.06em;
+    cursor: pointer;
+    transition: all var(--dur-fast) var(--ease-out);
+    white-space: nowrap;
+  }
+  .mp-seg-btn.active { background: var(--surface-hover); color: var(--text-primary); }
+
+  /* Select */
+  .mp-select {
+    background: var(--surface-base);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    padding: 6px var(--space-3);
+    cursor: pointer;
+    min-width: 140px;
+    appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6' fill='none'%3E%3Cpath d='M1 1L5 5L9 1' stroke='%23a1a1aa' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 10px center;
+    padding-right: 28px;
+  }
+  .mp-select:focus { outline: none; border-color: var(--brand-500); }
+
+  /* Text input */
+  .mp-text-input {
+    background: var(--surface-base);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    padding: 6px var(--space-3);
+    min-width: 200px;
+  }
+  .mp-text-input:focus { outline: none; border-color: var(--brand-500); }
+  .mp-text-input::placeholder { color: var(--text-tertiary); }
+
+  /* Notification routing matrix */
+  .mp-routing-table {
+    background: var(--surface-base);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-md);
+    overflow: hidden;
+    margin-top: var(--space-3);
+  }
+  .mp-routing-header,
+  .mp-routing-row {
+    display: grid;
+    grid-template-columns: 120px repeat(3, 1fr);
+    align-items: center;
+    padding: var(--space-3) var(--space-4);
+    gap: var(--space-3);
+  }
+  .mp-routing-header {
+    background: var(--surface-overlay);
+    border-bottom: 1px solid var(--border-default);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--text-tertiary);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    font-weight: 600;
+  }
+  .mp-routing-row {
+    border-bottom: 1px solid var(--border-subtle);
+  }
+  .mp-routing-row:last-child { border-bottom: none; }
+  .mp-routing-severity {
+    display: flex; align-items: center; gap: var(--space-2);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    font-weight: 600;
+  }
+  .mp-routing-severity.critical { color: var(--status-crit); }
+  .mp-routing-severity.warning  { color: var(--status-warn); }
+  .mp-routing-severity.info     { color: var(--status-info); }
+  .mp-routing-cell {
+    display: flex; align-items: center; gap: var(--space-2);
+  }
+
+  /* Integration card */
+  .mp-int-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: var(--space-3);
+    margin-top: var(--space-3);
+  }
+  .mp-int-card {
+    padding: var(--space-4);
+    background: var(--surface-base);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-md);
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+  }
+  .mp-int-head {
+    display: flex; justify-content: space-between; align-items: flex-start;
+  }
+  .mp-int-name {
+    font-size: 14px; font-weight: 600; color: var(--text-primary);
+  }
+  .mp-int-meta {
+    font-family: var(--font-mono);
+    font-size: 11px; color: var(--text-tertiary);
+    margin-top: 2px;
+  }
+  .mp-int-status {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    padding: 3px 8px;
+    border-radius: 100px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 600;
+  }
+  .mp-int-status.connected { background: rgba(16, 185, 129, 0.1); color: var(--status-ok); border: 1px solid rgba(16, 185, 129, 0.25); }
+  .mp-int-status.disconnected { background: var(--surface-overlay); color: var(--text-tertiary); border: 1px solid var(--border-default); }
+
+  /* API token table */
+  .mp-token-table {
+    background: var(--surface-base);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-md);
+    overflow: hidden;
+    margin-top: var(--space-3);
+  }
+  .mp-token-header,
+  .mp-token-row {
+    display: grid;
+    grid-template-columns: 1.2fr 100px 100px 100px auto;
+    align-items: center;
+    padding: var(--space-3) var(--space-4);
+    gap: var(--space-4);
+  }
+  .mp-token-header {
+    background: var(--surface-overlay);
+    border-bottom: 1px solid var(--border-default);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--text-tertiary);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    font-weight: 600;
+  }
+  .mp-token-row { border-bottom: 1px solid var(--border-subtle); }
+  .mp-token-row:last-child { border-bottom: none; }
+  .mp-token-name {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--text-primary);
+    font-weight: 500;
+  }
+  .mp-token-secret {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-tertiary);
+    margin-top: 2px;
+    letter-spacing: 0.05em;
+  }
+  .mp-token-meta {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--text-secondary);
+  }
+  .mp-token-perm {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    padding: 2px 6px;
+    background: var(--surface-overlay);
+    border: 1px solid var(--border-default);
+    border-radius: 4px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-secondary);
+    width: fit-content;
+  }
+  .mp-token-perm.write { color: var(--brand-300); border-color: rgba(196, 181, 253, 0.25); }
+  .mp-btn.danger {
+    background: transparent;
+    color: var(--status-crit);
+    border-color: rgba(239, 68, 68, 0.3);
+  }
+  .mp-btn.danger:hover { background: rgba(239, 68, 68, 0.08); }
+
+  /* Settings panel */
+  .mp-settings-panel-title {
+    font-family: var(--font-display);
+    font-size: 18px; font-weight: 500; line-height: 1.1;
+    letter-spacing: -0.02em;
+    color: var(--text-primary);
+    margin-bottom: 4px;
+  }
+  .mp-settings-panel-desc {
+    font-size: 12px; color: var(--text-secondary);
+    margin-bottom: var(--space-5);
+  }
+
+  /* Scrollbar */
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border-default); border-radius: 4px; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--border-strong); }
+`;
+
+/* ═══════════════════════════════════════════════════════════════
+   PRIMITIVES
+   ─────────────────────────────────────────────────────────────── */
+
+const HealthPill = ({ status, label = null }) => {
+  const Icon =
+    status === 'healthy' || status === 'completed' ? CheckCircle2
+    : status === 'attention' ? AlertTriangle
+    : status === 'cancelled' ? XCircle
+    : XCircle;
+  const defaultLabel =
+    status === 'healthy' ? 'HEALTHY'
+    : status === 'attention' ? 'ATTENTION'
+    : status === 'critical' ? 'CRITICAL'
+    : status === 'completed' ? 'COMPLETED'
+    : status === 'failed' ? 'FAILED'
+    : status === 'cancelled' ? 'CANCELLED'
+    : 'UNKNOWN';
   return (
-    <div className="critical-alert-banner">
-      <div className="alert-banner-content">
-        <div className="alert-banner-icon">
-          <AlertTriangle size={20} />
-        </div>
-        <div className="alert-banner-text">
-          <strong>Critical Alert:</strong> {criticalAlerts[0].message}
-          {criticalAlerts.length > 1 && ` (+${criticalAlerts.length - 1} more)`}
-        </div>
-        <div className="alert-banner-actions">
-          <button className="alert-banner-action" onClick={() => onViewDetails?.(criticalAlerts[0])}>
-            <Eye size={16} />
-            View Details
-          </button>
-          <button className="alert-banner-action secondary" onClick={() => onDismiss?.(criticalAlerts[0].id)}>
-            Dismiss
-          </button>
-        </div>
+    <span className={`mp-health-pill ${status}`}>
+      <Icon className="mp-health-pill-icon" strokeWidth={2.5} />
+      {label || defaultLabel}
+    </span>
+  );
+};
+
+const StatCell = ({ label, value, unit = null, detail = null, delta = null, deltaDir = null, loading = false }) => (
+  <div className="mp-stat-cell">
+    <span className="mp-stat-lbl">{label}</span>
+    {loading ? (
+      <div className="mp-skeleton" style={{ height: 28, width: '60%' }} />
+    ) : (
+      <span className="mp-stat-val">
+        {value}
+        {unit && <span className="unit">{unit}</span>}
+      </span>
+    )}
+    {!loading && (detail || delta) && (
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 8 }}>
+        {detail && <span className="mp-stat-detail">{detail}</span>}
+        {delta && <span className={`mp-stat-delta ${deltaDir || 'neutral'}`}>{delta}</span>}
       </div>
+    )}
+  </div>
+);
+
+const PageHeader = ({ title, subtitle = null, meta = null }) => (
+  <div className="mp-page-header">
+    <div className="mp-page-header-text">
+      <h1 className="mp-page-title">{title}</h1>
+      {subtitle && <p className="mp-page-sub">{subtitle}</p>}
+    </div>
+    {meta && <div className="mp-meta-strip">{meta}</div>}
+  </div>
+);
+
+const Panel = ({ title = null, description = null, action = null, hero = false, children }) => (
+  <div className={`mp-panel ${hero ? 'hero' : ''}`}>
+    {(title || description || action) && (
+      <div className="mp-panel-header">
+        <div className="mp-panel-title-block">
+          {title && <h2 className="mp-panel-title">{title}</h2>}
+          {description && <p className="mp-panel-desc">{description}</p>}
+        </div>
+        {action}
+      </div>
+    )}
+    {children}
+  </div>
+);
+
+const RunStripStat = ({ label, value, secondary = null }) => (
+  <div className="mp-run-strip-stat">
+    <span className="mp-stat-lbl">{label}</span>
+    <span className="mp-run-strip-stat-val">{value}</span>
+    {secondary && <span className="mp-run-strip-stat-secondary">{secondary}</span>}
+  </div>
+);
+
+const formatNum = (v, digits = 4) => {
+  if (v === null || v === undefined || Number.isNaN(v)) return '—';
+  return typeof v === 'number' ? v.toFixed(digits) : v;
+};
+
+const ChartTooltip = ({ active, payload, label, formatter, xLabel = 'step' }) => {
+  if (!active || !payload || !payload.length) return null;
+  return (
+    <div className="mp-tip">
+      <div className="mp-tip-ts">{xLabel} {typeof label === 'number' ? label.toLocaleString() : label}</div>
+      {payload.map((entry) => (
+        <div key={entry.dataKey} className="mp-tip-row">
+          <span className="mp-tip-name">
+            <span className="mp-tip-dot" style={{ background: entry.color || entry.stroke || entry.fill }} />
+            {entry.name || entry.dataKey}
+          </span>
+          <span className="mp-tip-val">
+            {formatter
+              ? formatter(entry.value, entry.dataKey)
+              : (entry.value === null || entry.value === undefined ? '—' : entry.value)}
+          </span>
+        </div>
+      ))}
     </div>
   );
 };
 
-// Enhanced Metric Card Component with thresholds and trends
-const MetricCard = ({ title, value, threshold, trend, unit = '', status = 'normal' }) => {
-  const getTrendIcon = () => {
-    if (trend > 0) return <ArrowUp size={16} className="trend-up" />;
-    if (trend < 0) return <ArrowDown size={16} className="trend-down" />;
-    return null;
-  };
-
-  const getStatusColor = () => {
-    switch(status) {
-      case 'critical': return '#ef4444';
-      case 'warning': return '#f59e0b';
-      case 'good': return '#10b981';
-      default: return '#8b5cf6';
-    }
-  };
-
+// Inline sparkline for KL trend
+const Sparkline = ({ data, color, threshold = null }) => {
+  const chartData = useMemo(() => data.map((v, i) => ({ i, v })), [data]);
   return (
-    <div className={`metric-card ${status}`}>
-      <div className="metric-header">
-        <h4>{title}</h4>
-        {getTrendIcon()}
-      </div>
-      <div className="metric-value" style={{ color: getStatusColor() }}>
-        {value}{unit}
-      </div>
-      {threshold && (
-        <div className="metric-threshold">
-          Threshold: {threshold}{unit}
-        </div>
-      )}
+    <div className="mp-feature-spark">
+      <ResponsiveContainer width="100%" height="100%">
+        <LineChart data={chartData} margin={{ top: 2, right: 0, bottom: 2, left: 0 }}>
+          <Line
+            type="monotone"
+            dataKey="v"
+            stroke={color}
+            strokeWidth={1.5}
+            dot={false}
+            isAnimationActive={false}
+          />
+          <YAxis hide domain={[0, Math.max(1.5, Math.max(...data) * 1.1)]} />
+        </LineChart>
+      </ResponsiveContainer>
     </div>
   );
 };
 
-// Enhanced Overview Page Component with actionable insights
-const OverviewPage = () => {
-  const [showModal, setShowModal] = useState(null);
-  const [retrainingStatus, setRetrainingStatus] = useState('idle'); // idle, starting, running
-  const [scalingStatus, setScalingStatus] = useState('idle');
-  
-  const currentAccuracy = accuracyData[accuracyData.length - 1].y;
-  const currentLatency = latencyData[latencyData.length - 1].y;
-  const currentDrift = driftData[driftData.length - 1].y;
-  
-  const alerts = [
-    { id: 1, type: 'error', message: 'Model accuracy dropped to 80% (below 85% threshold)', time: '2 minutes ago', severity: 'High' },
-    { id: 2, type: 'warning', message: 'Latency spiked to 72ms in US regions', time: '5 minutes ago', severity: 'Medium' },
-    { id: 3, type: 'error', message: 'Critical data drift detected (0.9/1.0)', time: '8 minutes ago', severity: 'High' },
-  ];
+const ActionIcon = ({ name, size = 12 }) => {
+  if (name === 'wrench') return <Wrench size={size} />;
+  if (name === 'rotate') return <RotateCw size={size} />;
+  if (name === 'external') return <ExternalLink size={size} />;
+  return null;
+};
 
-  const handleStartRetraining = () => {
-    setRetrainingStatus('starting');
-    setTimeout(() => {
-      setRetrainingStatus('running');
-      setShowModal('retraining-started');
-    }, 1500);
-  };
+/* ═══════════════════════════════════════════════════════════════
+   PAGE: OVERVIEW
+   ─────────────────────────────────────────────────────────────── */
 
-  const handleScaleNow = () => {
-    setScalingStatus('starting');
-    setTimeout(() => {
-      setScalingStatus('idle');
-      setShowModal('scaling-complete');
-    }, 2000);
-  };
+const OverviewPage = ({ onToast }) => {
+  // Simulated initial loading on the throughput card
+  const [loadingThroughput, setLoadingThroughput] = useState(true);
+  useEffect(() => {
+    const t = setTimeout(() => setLoadingThroughput(false), 700);
+    return () => clearTimeout(t);
+  }, []);
 
-  const handleInvestigate = () => {
-    setShowModal('investigation-report');
-  };
+  const totalGpus = activeRuns.reduce((s, r) => s + r.gpuCount, 0);
+  const totalThroughput = activeRuns.reduce(
+    (s, r) => s + r.throughputPerGpu * r.gpuCount, 0
+  );
 
-  const handleAlertAction = (alert) => {
-    setShowModal('alert-details');
-  };
+  const totalIncidents = incidentData.reduce(
+    (s, d) => s + d.critical + d.warning + d.info, 0
+  );
+  const peakHour = incidentData.reduce(
+    (best, d, i) => {
+      const total = d.critical + d.warning + d.info;
+      return total > best.total ? { total, i } : best;
+    },
+    { total: 0, i: 0 }
+  );
 
-  const handleDismissAlert = (alertId) => {
-    setShowModal('alert-dismissed');
-  };
+  const hasRuns = activeRuns.length > 0;
+
+  const meta = (
+    <>
+      <span className="mp-meta-chip live"><span className="mp-meta-pulse" />Live</span>
+      <span className="mp-meta-chip"><Globe2 size={10} />UTC</span>
+    </>
+  );
 
   return (
-    <div className="page-content">
-      <CriticalAlertBanner 
-        alerts={alerts} 
-        onViewDetails={handleAlertAction}
-        onDismiss={handleDismissAlert}
+    <>
+      <PageHeader
+        title="Overview"
+        subtitle="Fleet-wide observability across all active runs"
+        meta={meta}
       />
-      
-      <div className="page-header">
-        <h2>Model Overview</h2>
-        <p>Real-time monitoring of your ML models with actionable insights</p>
-      </div>
 
-      {/* Key Metrics Summary */}
-      <div className="metrics-summary">
-        <MetricCard 
-          title="Current Accuracy" 
-          value={(currentAccuracy * 100).toFixed(1)} 
-          unit="%" 
-          threshold="85"
-          trend={-2.1}
-          status={currentAccuracy < 0.85 ? 'critical' : 'good'}
+      <div className="mp-stat-row">
+        <StatCell label="Active runs" value={activeRuns.length} detail="2 yours, 1 team" delta="+1" deltaDir="up" />
+        <StatCell
+          label="Cluster throughput"
+          value={(totalThroughput / 1000).toFixed(1)} unit="k tok/s"
+          detail={`Across ${totalGpus} GPUs · ${activeRuns.length} runs`}
+          delta="+3.2%" deltaDir="up"
+          loading={loadingThroughput}
         />
-        <MetricCard 
-          title="Avg Latency" 
-          value={currentLatency.toFixed(0)} 
-          unit="ms" 
-          threshold="60"
-          trend={1.8}
-          status={currentLatency > 60 ? 'warning' : 'good'}
-        />
-        <MetricCard 
-          title="Drift Score" 
-          value={currentDrift.toFixed(2)} 
-          unit="" 
-          threshold="0.5"
-          trend={2.5}
-          status={currentDrift > 0.8 ? 'critical' : currentDrift > 0.5 ? 'warning' : 'good'}
-        />
-        <MetricCard 
-          title="Active Models" 
-          value="12" 
-          unit="" 
-          trend={0}
-          status="good"
-        />
-      </div>
-      
-      <div className="charts-grid">
-        <div className="chart-container">
-          <div className="chart-header">
-            <h3>ACCURACY</h3>
-            <div className="chart-actions">
-              <span className={`status-indicator ${currentAccuracy < 0.85 ? 'critical' : 'good'}`}>
-                {currentAccuracy < 0.85 ? 'Below Threshold' : 'Healthy'}
-              </span>
-            </div>
-          </div>
-          <ResponsiveContainer width="100%" height="80%">
-            <LineChart data={accuracyData}>
-              <XAxis dataKey="x" axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: '#9CA3AF' }} />
-              <YAxis domain={[0.75, 1]} axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: '#9CA3AF' }} />
-              <ReferenceLine y={0.85} stroke="#ef4444" strokeDasharray="3 3" />
-              <Line type="monotone" dataKey="y" stroke="#8B5CF6" strokeWidth={3} dot={false} />
-            </LineChart>
-          </ResponsiveContainer>
-          <div className="chart-insight">
-            <AlertCircle size={14} />
-            <span>Accuracy dropped 8% in last hour. Check recent data quality.</span>
-          </div>
-        </div>
-
-        <div className="chart-container">
-          <div className="chart-header">
-            <h3>LATENCY</h3>
-            <div className="chart-actions">
-              <span className={`status-indicator ${currentLatency > 60 ? 'warning' : 'good'}`}>
-                {currentLatency > 60 ? 'High Latency' : 'Normal'}
-              </span>
-            </div>
-          </div>
-          <ResponsiveContainer width="100%" height="80%">
-            <LineChart data={latencyData}>
-              <XAxis dataKey="x" axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: '#9CA3AF' }} />
-              <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: '#9CA3AF' }} />
-              <ReferenceLine y={60} stroke="#f59e0b" strokeDasharray="3 3" />
-              <Line type="monotone" dataKey="y" stroke="#8B5CF6" strokeWidth={3} dot={false} />
-            </LineChart>
-          </ResponsiveContainer>
-          <div className="chart-insight">
-            <Zap size={14} />
-            <span>Latency increased 15% in US-East region. Scale additional instances.</span>
-          </div>
-        </div>
-
-        <div className="chart-container">
-          <div className="chart-header">
-            <h3>CONFIDENCE</h3>
-            <div className="chart-actions">
-              <span className="status-indicator good">Stable</span>
-            </div>
-          </div>
-          <ResponsiveContainer width="100%" height="80%">
-            <LineChart data={confidenceData}>
-              <XAxis dataKey="x" axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: '#9CA3AF' }} />
-              <YAxis domain={[0.6, 0.85]} axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: '#9CA3AF' }} />
-              <Line type="monotone" dataKey="y" stroke="#8B5CF6" strokeWidth={3} dot={false} />
-            </LineChart>
-          </ResponsiveContainer>
-          <div className="chart-insight">
-            <CheckCircle size={14} />
-            <span>Confidence scores remain stable across all regions.</span>
-          </div>
-        </div>
-
-        <div className="chart-container">
-          <div className="chart-header">
-            <h3>DRIFT SCORE</h3>
-            <div className="chart-actions">
-              <span className="status-indicator critical">Critical</span>
-            </div>
-          </div>
-          <ResponsiveContainer width="100%" height="80%">
-            <LineChart data={driftData}>
-              <XAxis dataKey="x" axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: '#9CA3AF' }} />
-              <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: '#9CA3AF' }} />
-              <ReferenceLine y={0.5} stroke="#f59e0b" strokeDasharray="3 3" />
-              <ReferenceLine y={0.8} stroke="#ef4444" strokeDasharray="3 3" />
-              <Line type="monotone" dataKey="y" stroke="#8B5CF6" strokeWidth={3} dot={false} />
-            </LineChart>
-          </ResponsiveContainer>
-          <div className="chart-insight">
-            <Shield size={14} />
-            <span>Feature X showing 90% drift. Retrain model with recent data immediately.</span>
-          </div>
-        </div>
+        <StatCell label="Open alerts" value="2" detail="1 warning, 1 critical" delta="-1" deltaDir="up" />
+        <StatCell label="Uptime · 30d" value="99.8" unit="%" detail="87m downtime · last incident 8d ago" />
       </div>
 
-      {/* Actionable Recommendations */}
-      <div className="recommendations-section">
-        <h3>Immediate Actions Required</h3>
-        <div className="recommendations-grid">
-          <div className="recommendation-card urgent">
-            <div className="recommendation-icon">
-              <AlertTriangle size={20} />
-            </div>
-            <div className="recommendation-content">
-              <h4>Model Retraining Required</h4>
-              <p>High drift score (0.9) indicates training data mismatch. Schedule immediate retraining.</p>
-              <button 
-                className={`recommendation-action ${retrainingStatus === 'starting' ? 'loading' : ''}`}
-                onClick={handleStartRetraining}
-                disabled={retrainingStatus !== 'idle'}
-              >
-                {retrainingStatus === 'idle' && 'Start Retraining'}
-                {retrainingStatus === 'starting' && 'Starting...'}
-                {retrainingStatus === 'running' && 'Retraining Active'}
-              </button>
-            </div>
-          </div>
-          
-          <div className="recommendation-card warning">
-            <div className="recommendation-icon">
-              <Zap size={20} />
-            </div>
-            <div className="recommendation-content">
-              <h4>Scale Infrastructure</h4>
-              <p>Latency spikes in US regions. Add 2 more instances to handle increased load.</p>
-              <button 
-                className={`recommendation-action ${scalingStatus === 'starting' ? 'loading' : ''}`}
-                onClick={handleScaleNow}
-                disabled={scalingStatus !== 'idle'}
-              >
-                {scalingStatus === 'idle' && 'Scale Now'}
-                {scalingStatus === 'starting' && 'Scaling...'}
-              </button>
-            </div>
-          </div>
-          
-          <div className="recommendation-card info">
-            <div className="recommendation-icon">
-              <Eye size={20} />
-            </div>
-            <div className="recommendation-content">
-              <h4>Data Quality Check</h4>
-              <p>Accuracy drop correlates with recent data changes. Review input validation.</p>
-              <button className="recommendation-action" onClick={handleInvestigate}>
-                Investigate
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* Modal System */}
-      {showModal && (
-        <div className="modal-overlay" onClick={() => setShowModal(null)}>
-          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
-            {showModal === 'retraining-started' && (
-              <>
-                <h3>🚀 Model Retraining Started</h3>
-                <p>Training pipeline initiated with the last 30 days of data. Estimated completion: 2.5 hours.</p>
-                <div className="modal-actions">
-                  <button onClick={() => setShowModal(null)}>Close</button>
-                  <button className="primary">Monitor Progress</button>
+      <Panel title="Active runs" description="Training runs currently in progress">
+        {hasRuns ? activeRuns.map(run => {
+          const progressPct = (run.step / run.totalSteps) * 100;
+          const status = deriveStatus(run.subSignals);
+          return (
+            <div key={run.id} className="mp-run-row" tabIndex={0} role="button">
+              <HealthPill status={status} />
+              <div className="mp-run-row-name">
+                <span className="mp-run-row-title">{run.id}</span>
+                <span className="mp-run-row-config">{run.config}</span>
+              </div>
+              <div className="mp-run-row-progress">
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontFamily: 'var(--font-mono)', fontSize: '10px', color: 'var(--text-tertiary)' }}>
+                  <span>{run.step.toLocaleString()}</span>
+                  <span>{progressPct.toFixed(0)}%</span>
                 </div>
-              </>
-            )}
-            {showModal === 'scaling-complete' && (
-              <>
-                <h3>⚡ Infrastructure Scaled</h3>
-                <p>Successfully added 2 new instances in US-East-1. Latency should improve within 5 minutes.</p>
-                <div className="modal-actions">
-                  <button onClick={() => setShowModal(null)}>Close</button>
-                  <button className="primary">View Metrics</button>
-                </div>
-              </>
-            )}
-            {showModal === 'investigation-report' && (
-              <>
-                <h3>🔍 Data Quality Investigation</h3>
-                <div className="investigation-details">
-                  <p><strong>Issue Detected:</strong> 15% increase in missing values in feature_x</p>
-                  <p><strong>Root Cause:</strong> Data pipeline modification on Dec 18</p>
-                  <p><strong>Recommendation:</strong> Roll back pipeline changes and implement validation</p>
-                </div>
-                <div className="modal-actions">
-                  <button onClick={() => setShowModal(null)}>Close</button>
-                  <button className="primary">Fix Pipeline</button>
-                </div>
-              </>
-            )}
-            {showModal === 'alert-details' && (
-              <>
-                <h3>🔴 Critical Alert Details</h3>
-                <p>Model accuracy has dropped below the 85% threshold and requires immediate attention.</p>
-                <div className="alert-timeline">
-                  <div className="timeline-item">
-                    <span className="time">14:30</span>
-                    <span className="event">Accuracy: 85.2% → 82.1%</span>
-                  </div>
-                  <div className="timeline-item">
-                    <span className="time">14:32</span>
-                    <span className="event">Alert triggered</span>
-                  </div>
-                </div>
-                <div className="modal-actions">
-                  <button onClick={() => setShowModal(null)}>Close</button>
-                  <button className="primary">Take Action</button>
-                </div>
-              </>
-            )}
-            {showModal === 'alert-dismissed' && (
-              <>
-                <h3>✅ Alert Dismissed</h3>
-                <p>The alert has been acknowledged. Monitor the situation and take action if needed.</p>
-                <div className="modal-actions">
-                  <button onClick={() => setShowModal(null)}>Close</button>
-                </div>
-              </>
-            )}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-};
-
-// Enhanced Alerts Page Component
-const AlertsPage = () => {
-  const alerts = [
-    { id: 1, type: 'error', message: 'Model accuracy dropped below 85% threshold', time: '2 minutes ago', severity: 'High', feature: 'accuracy_monitor', region: 'US-East-1' },
-    { id: 2, type: 'warning', message: 'Latency increased by 15% in production', time: '5 minutes ago', severity: 'Medium', feature: 'latency_monitor', region: 'EU-West-1' },
-    { id: 3, type: 'error', message: 'Critical data drift detected in Feature X', time: '8 minutes ago', severity: 'High', feature: 'drift_monitor', region: 'Global' },
-    { id: 4, type: 'info', message: 'Model v2.1.3 deployed successfully', time: '1 hour ago', severity: 'Low', feature: 'deployment', region: 'All Regions' },
-    { id: 5, type: 'warning', message: 'Memory usage approaching 85% limit', time: '2 hours ago', severity: 'Medium', feature: 'resource_monitor', region: 'Asia-Pacific' }
-  ];
-
-  const getAlertIcon = (type) => {
-    switch(type) {
-      case 'error': return <XCircle className="alert-icon error" />;
-      case 'warning': return <AlertCircle className="alert-icon warning" />;
-      case 'success': return <CheckCircle className="alert-icon success" />;
-      default: return <AlertCircle className="alert-icon info" />;
-    }
-  };
-
-  return (
-    <div className="page-content">
-      <div className="page-header">
-        <h2>Alerts & Notifications</h2>
-        <p>Monitor system alerts with contextual information and recommended actions</p>
-      </div>
-      
-      <div className="alerts-container">
-        <div className="alerts-summary">
-          <div className="summary-card error">
-            <h4>2</h4>
-            <p>Critical Alerts</p>
-            <span className="summary-trend">+1 from yesterday</span>
-          </div>
-          <div className="summary-card warning">
-            <h4>2</h4>
-            <p>Warnings</p>
-            <span className="summary-trend">Same as yesterday</span>
-          </div>
-          <div className="summary-card success">
-            <h4>1</h4>
-            <p>Resolved Today</p>
-            <span className="summary-trend">-3 from yesterday</span>
-          </div>
-          <div className="summary-card info">
-            <h4>98.2%</h4>
-            <p>System Uptime</p>
-            <span className="summary-trend">↑ 0.1% this week</span>
-          </div>
-        </div>
-
-        <div className="alerts-list">
-          {alerts.map(alert => (
-            <div key={alert.id} className={`alert-item ${alert.type}`}>
-              {getAlertIcon(alert.type)}
-              <div className="alert-content">
-                <div className="alert-message">{alert.message}</div>
-                <div className="alert-meta">
-                  <span className="alert-time">{alert.time}</span>
-                  <span className={`alert-severity ${alert.severity.toLowerCase()}`}>{alert.severity}</span>
-                  <span className="alert-feature">{alert.feature}</span>
-                  <span className="alert-region">{alert.region}</span>
+                <div className="mp-run-row-progress-bar">
+                  <div className="mp-run-row-progress-fill" style={{ width: `${progressPct}%` }} />
                 </div>
               </div>
-              <div className="alert-actions">
-                <button className="alert-action-btn">Fix Now</button>
-                <button className="alert-action-btn">Details</button>
+              <div className="mp-run-row-stat">
+                <span style={{ fontSize: '10px', color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>Loss</span>
+                <span className="mp-run-row-stat-val">{run.loss.toFixed(3)}</span>
+              </div>
+              <div className="mp-run-row-stat">
+                <span style={{ fontSize: '10px', color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>ETA</span>
+                <span className="mp-run-row-stat-val">{run.eta}</span>
+              </div>
+              <ChevronRight size={14} color="var(--text-tertiary)" />
+            </div>
+          );
+        }) : (
+          <div className="mp-empty">
+            No runs are currently active.
+            <div className="mp-empty-mono">Launch a training run to see it here.</div>
+          </div>
+        )}
+      </Panel>
+
+      <Panel title="Incidents · last 24 hours" description="Alert count per hour, by severity">
+        <div className="mp-chart-wrap">
+          <ResponsiveContainer width="100%" height={220}>
+            <BarChart data={incidentData} margin={{ top: 12, right: 16, bottom: 28, left: 16 }}>
+              <CartesianGrid stroke="#1e1e24" strokeDasharray="2 4" vertical={false} />
+              <XAxis
+                dataKey="hour"
+                tick={{ fontFamily: 'JetBrains Mono', fontSize: 10, fill: '#71717a' }}
+                tickLine={false}
+                axisLine={{ stroke: '#27272f' }}
+                interval={3}
+                label={{ value: 'HOUR (UTC)', position: 'insideBottom', offset: -14, fill: '#a1a1aa', fontSize: 10, fontFamily: 'JetBrains Mono', letterSpacing: '0.08em' }}
+              />
+              <YAxis
+                tick={{ fontFamily: 'JetBrains Mono', fontSize: 10, fill: '#71717a' }}
+                tickLine={false}
+                axisLine={{ stroke: '#27272f' }}
+                label={{ value: 'COUNT', angle: -90, position: 'insideLeft', offset: 10, fill: '#a1a1aa', fontSize: 10, fontFamily: 'JetBrains Mono', letterSpacing: '0.08em' }}
+              />
+              <Tooltip
+                content={<ChartTooltip xLabel="hour" />}
+                cursor={{ fill: 'rgba(139, 92, 246, 0.06)' }}
+              />
+              <Bar dataKey="info"     name="Info"     stackId="s" fill="#3b82f6" radius={[0, 0, 0, 0]} />
+              <Bar dataKey="warning"  name="Warning"  stackId="s" fill="#f59e0b" radius={[0, 0, 0, 0]} />
+              <Bar dataKey="critical" name="Critical" stackId="s" fill="#ef4444" radius={[2, 2, 0, 0]} />
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+        <div className="mp-chart-legend">
+          <span className="mp-chart-legend-chip"><span className="mp-chart-legend-line crit" />Critical</span>
+          <span className="mp-chart-legend-chip"><span className="mp-chart-legend-line warn" />Warning</span>
+          <span className="mp-chart-legend-chip"><span className="mp-chart-legend-line info-color" />Info</span>
+          <span className="mp-chart-legend-delta">{totalIncidents} total · peak at {incidentData[peakHour.i].hour} UTC ({peakHour.total} concurrent)</span>
+        </div>
+      </Panel>
+    </>
+  );
+};
+
+/* ═══════════════════════════════════════════════════════════════
+   PAGE: RUNS — historical index, distinct from Overview
+   ─────────────────────────────────────────────────────────────── */
+
+const RunsPage = () => {
+  const [stateFilter, setStateFilter] = useState('all');
+  const [search, setSearch] = useState('');
+  const [ownerFilter, setOwnerFilter] = useState('all');
+
+  const allRuns = useMemo(() => [
+    ...activeRuns.map(r => ({ ...r, finalLoss: r.loss, duration: r.startedAgo, failureReason: null })),
+    ...historicalRuns,
+  ], []);
+
+  const owners = useMemo(() => {
+    const set = new Set(allRuns.map(r => r.owner));
+    return ['all', ...Array.from(set)];
+  }, [allRuns]);
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return allRuns.filter(r => {
+      const stateMatch = stateFilter === 'all' || r.state === stateFilter;
+      const ownerMatch = ownerFilter === 'all' || r.owner === ownerFilter;
+      const searchMatch = !q
+        || r.id.toLowerCase().includes(q)
+        || r.config.toLowerCase().includes(q);
+      return stateMatch && ownerMatch && searchMatch;
+    });
+  }, [allRuns, stateFilter, ownerFilter, search]);
+
+  const meta = <span className="mp-meta-chip"><Globe2 size={10} />UTC</span>;
+
+  return (
+    <>
+      <PageHeader
+        title="Runs"
+        subtitle="All runs ever — active, completed, failed, cancelled"
+        meta={meta}
+      />
+
+      <div className="mp-stat-row">
+        <StatCell label="Total" value={allRuns.length} detail="Last 30 days" />
+        <StatCell label="Completed" value={allRuns.filter(r => r.state === 'completed').length} detail="Success rate 67%" delta="—" deltaDir="neutral" />
+        <StatCell label="Failed" value={allRuns.filter(r => r.state === 'failed').length} detail="3 distinct causes" delta="-1" deltaDir="up" />
+        <StatCell label="Active now" value={allRuns.filter(r => r.state === 'active').length} detail={`${activeRuns.reduce((s, r) => s + r.gpuCount, 0)} GPUs in use`} />
+      </div>
+
+      <div className="mp-filter-bar">
+        <div className="mp-filter-input">
+          <Search size={12} />
+          <input
+            placeholder="Filter by run name or config…"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
+          {(search || stateFilter !== 'all' || ownerFilter !== 'all') && (
+            <span className="mp-filter-count">{filtered.length}/{allRuns.length}</span>
+          )}
+        </div>
+        <div className="mp-filter-group">
+          {['all', 'active', 'completed', 'failed', 'cancelled'].map(f => (
+            <button
+              key={f}
+              className={`mp-filter-chip ${stateFilter === f ? 'active' : ''}`}
+              onClick={() => setStateFilter(f)}
+            >
+              {f}
+            </button>
+          ))}
+        </div>
+        <div className="mp-filter-group">
+          {owners.map(o => (
+            <button
+              key={o}
+              className={`mp-filter-chip ${ownerFilter === o ? 'active' : ''}`}
+              onClick={() => setOwnerFilter(o)}
+            >
+              {o === 'all' ? 'all owners' : o}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {filtered.length === 0 ? (
+        <div className="mp-empty">
+          No runs match the current filters.
+          <div className="mp-empty-mono">Try clearing the search or filter chips.</div>
+        </div>
+      ) : (
+        <div>
+          {filtered.map(run => {
+            const progressPct = (run.step / run.totalSteps) * 100;
+            const pillStatus = run.state === 'active'
+              ? deriveStatus(run.subSignals)
+              : run.state;
+            const fillClass = run.state === 'failed' ? 'failed'
+              : run.state === 'cancelled' ? 'cancelled'
+              : run.state === 'completed' ? 'completed'
+              : '';
+            return (
+              <div key={run.id} className="mp-run-row" tabIndex={0} role="button">
+                <HealthPill status={pillStatus} />
+                <div className="mp-run-row-name">
+                  <span className="mp-run-row-title">{run.id}</span>
+                  <span className="mp-run-row-config">{run.config} · {run.owner}</span>
+                </div>
+                <div className="mp-run-row-progress">
+                  <div style={{ display: 'flex', justifyContent: 'space-between', fontFamily: 'var(--font-mono)', fontSize: '10px', color: 'var(--text-tertiary)' }}>
+                    <span>{run.step.toLocaleString()}</span>
+                    <span>{progressPct.toFixed(0)}%</span>
+                  </div>
+                  <div className="mp-run-row-progress-bar">
+                    <div className={`mp-run-row-progress-fill ${fillClass}`} style={{ width: `${progressPct}%` }} />
+                  </div>
+                </div>
+                <div className="mp-run-row-stat">
+                  <span style={{ fontSize: '10px', color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                    {run.state === 'active' ? 'Loss' : 'Final loss'}
+                  </span>
+                  <span className="mp-run-row-stat-val">
+                    {run.finalLoss !== null && run.finalLoss !== undefined ? run.finalLoss.toFixed(3) : '—'}
+                  </span>
+                </div>
+                <div className="mp-run-row-stat">
+                  <span style={{ fontSize: '10px', color: 'var(--text-tertiary)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+                    Duration
+                  </span>
+                  <span className="mp-run-row-stat-val">{run.duration || run.startedAgo}</span>
+                </div>
+                <ChevronRight size={14} color="var(--text-tertiary)" />
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </>
+  );
+};
+
+/* ═══════════════════════════════════════════════════════════════
+   PAGE: TRAINING — loss is hero; performance is investigative drawer
+   ─────────────────────────────────────────────────────────────── */
+
+const TrainingPage = ({ onToast }) => {
+  const [anatomyOpen, setAnatomyOpen] = useState(false);
+  const [phaseDetailOpen, setPhaseDetailOpen] = useState(false);
+  const [phaseView, setPhaseView] = useState('compare');
+
+  const dataMs = 11, fwdMs = 28, bwdMs = 46, optMs = 3;
+  const totalMs = dataMs + fwdMs + bwdMs + optMs;
+  const pct = v => (v / totalMs) * 100;
+
+  const latest = trainingSteps[trainingSteps.length - 1];
+  const gap = latest.evalLoss - latest.loss;
+
+  const subSignals = activeRuns[0].subSignals;
+  const runStatus = deriveStatus(subSignals);
+  const runReason = activeRuns[0].reason;
+
+  const allLosses = trainingSteps.flatMap(p => [p.loss, p.evalLoss]);
+  const yMin = Math.max(0, Math.min(...allLosses) - 0.03);
+  const yMax = Math.max(...allLosses) + 0.03;
+
+  const meta = (
+    <>
+      <span className="mp-meta-chip live"><span className="mp-meta-pulse" />Live · 2s ago</span>
+      <span className="mp-meta-chip"><Globe2 size={10} />UTC</span>
+    </>
+  );
+
+  return (
+    <>
+      <PageHeader
+        title="Training"
+        subtitle="Step-level observability for the active run"
+        meta={meta}
+      />
+
+      <div className="mp-run-strip">
+        <div className="mp-run-strip-left">
+          <HealthPill status={runStatus} />
+          <div className="mp-run-name-block">
+            <span className="mp-run-name">code-gen-7b / pretrain-v3</span>
+            <span className="mp-run-config">7B · bf16 · FSDP × 8 × A100 · started 6d 12h ago</span>
+            {runStatus !== 'healthy' && runReason && (
+              <span className="mp-run-reason">
+                <AlertTriangle size={11} strokeWidth={2.5} />
+                {runReason} · see Run health
+              </span>
+            )}
+          </div>
+        </div>
+        <div className="mp-run-strip-right">
+          <RunStripStat label="Step" value="8,412 / 50,000" />
+          <RunStripStat label="ETA" value="3d 11h" />
+          <RunStripStat label="Throughput" value="18.3k tok/s" secondary="2,285/GPU · 8 GPUs" />
+        </div>
+      </div>
+
+      <Panel
+        hero
+        title="Loss"
+        description="Training vs. eval — the overfitting signal"
+        action={
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
+            <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-tertiary)', letterSpacing: '0.08em', textTransform: 'uppercase' }}>Eval/train gap</span>
+            <span style={{ fontFamily: 'var(--font-mono)', fontSize: 22, fontWeight: 500, color: gap > 0.1 ? 'var(--status-warn)' : 'var(--text-primary)', fontVariantNumeric: 'tabular-nums', letterSpacing: '-0.02em' }}>
+              {gap.toFixed(3)}
+            </span>
+          </div>
+        }
+      >
+        <div className="mp-chart-wrap">
+          <ResponsiveContainer width="100%" height={280}>
+            <LineChart data={trainingSteps} margin={{ top: 12, right: 20, bottom: 32, left: 24 }}>
+              <CartesianGrid stroke="#1e1e24" strokeDasharray="2 4" vertical={false} />
+              <XAxis
+                dataKey="step"
+                tick={{ fontFamily: 'JetBrains Mono', fontSize: 10, fill: '#71717a' }}
+                tickLine={false}
+                axisLine={{ stroke: '#27272f' }}
+                tickFormatter={(v) => v >= 1000 ? `${v / 1000}k` : v}
+                label={{ value: 'STEP', position: 'insideBottom', offset: -18, fill: '#a1a1aa', fontSize: 10, fontFamily: 'JetBrains Mono', letterSpacing: '0.08em' }}
+              />
+              <YAxis
+                domain={[yMin, yMax]}
+                tick={{ fontFamily: 'JetBrains Mono', fontSize: 10, fill: '#71717a' }}
+                tickLine={false}
+                axisLine={{ stroke: '#27272f' }}
+                tickFormatter={(v) => v.toFixed(2)}
+                label={{ value: 'LOSS', angle: -90, position: 'insideLeft', offset: 4, fill: '#a1a1aa', fontSize: 10, fontFamily: 'JetBrains Mono', letterSpacing: '0.08em' }}
+              />
+              <Tooltip
+                content={<ChartTooltip xLabel="step" formatter={(v) => formatNum(v, 4)} />}
+                cursor={{ stroke: '#34343e', strokeDasharray: '2 4' }}
+              />
+              <Line type="monotone" dataKey="loss"     name="Train" stroke="#8b5cf6" strokeWidth={2} dot={false} animationDuration={600} />
+              <Line type="monotone" dataKey="evalLoss" name="Eval"  stroke="#06b6d4" strokeWidth={2} strokeDasharray="4 4" dot={false} animationDuration={600} animationBegin={120} />
+            </LineChart>
+          </ResponsiveContainer>
+        </div>
+        <div className="mp-chart-legend">
+          <span className="mp-chart-legend-chip"><span className="mp-chart-legend-line solid" />Train</span>
+          <span className="mp-chart-legend-val">{latest.loss.toFixed(3)}</span>
+          <span className="mp-chart-legend-chip" style={{ marginLeft: 12 }}><span className="mp-chart-legend-line dashed" />Eval</span>
+          <span className="mp-chart-legend-val">{latest.evalLoss.toFixed(3)}</span>
+          <span className="mp-chart-legend-delta">gap began widening ~step 4,000</span>
+        </div>
+      </Panel>
+
+      <Panel title="Run health" description="Observed patterns over the last 500 steps">
+        <div className="mp-health-grid">
+          <div className="mp-health-cell ok">
+            <span className="mp-stat-lbl">Gradient norm</span>
+            <span className="mp-stat-val">0.84</span>
+            <span className="mp-stat-detail">Stable · σ = 0.12</span>
+          </div>
+          <div className="mp-health-cell ok">
+            <span className="mp-stat-lbl">Loss spikes</span>
+            <span className="mp-stat-val">0</span>
+            <span className="mp-stat-detail">No outliers {'>'} 3σ</span>
+          </div>
+          <div className="mp-health-cell ok">
+            <span className="mp-stat-lbl">Throughput</span>
+            <span className="mp-stat-val">18.3<span className="unit">k/s</span></span>
+            <span className="mp-stat-detail">Cluster · σ = 3.4%</span>
+          </div>
+          <div className="mp-health-cell warn">
+            <span className="mp-stat-lbl">Eval/train gap</span>
+            <span className="mp-stat-val">{gap.toFixed(3)}</span>
+            <span className="mp-stat-detail">Widening since step 4k</span>
+          </div>
+        </div>
+      </Panel>
+
+      <Panel
+        title="Performance breakdown"
+        description="Step-phase timings — open when throughput regresses"
+        action={
+          <button
+            className="mp-btn ghost"
+            onClick={() => setAnatomyOpen(!anatomyOpen)}
+            aria-expanded={anatomyOpen}
+          >
+            <ChevronDown
+              size={14}
+              style={{ transform: anatomyOpen ? 'rotate(180deg)' : 'none', transition: 'transform var(--dur-base) var(--ease-out)' }}
+            />
+            {anatomyOpen ? 'Collapse' : 'Expand'}
+          </button>
+        }
+      >
+        {anatomyOpen && (
+          <>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', marginBottom: 20 }}>
+              <div style={{ fontSize: 13, color: 'var(--text-secondary)' }}>
+                Current step (ms per phase)
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end' }}>
+                <span style={{ fontFamily: 'var(--font-mono)', fontSize: 28, fontWeight: 500, color: 'var(--text-primary)', lineHeight: 1, letterSpacing: '-0.02em', fontVariantNumeric: 'tabular-nums' }}>
+                  {totalMs}<span style={{ fontSize: 14, color: 'var(--text-tertiary)', marginLeft: 2, fontWeight: 400 }}>ms</span>
+                </span>
+                <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-tertiary)', letterSpacing: '0.1em', textTransform: 'uppercase', marginTop: 4 }}>per step</span>
+              </div>
+            </div>
+
+            <div className="mp-anatomy-bar">
+              <div className="mp-anatomy-seg data" style={{ width: `${pct(dataMs)}%` }}>
+                <span className="mp-aseg-lbl">Data</span><span className="mp-aseg-val">{dataMs}ms</span>
+              </div>
+              <div className="mp-anatomy-seg fwd" style={{ width: `${pct(fwdMs)}%` }}>
+                <span className="mp-aseg-lbl">Forward</span><span className="mp-aseg-val">{fwdMs}ms</span>
+              </div>
+              <div className="mp-anatomy-seg bwd" style={{ width: `${pct(bwdMs)}%` }}>
+                <span className="mp-aseg-lbl">Backward</span><span className="mp-aseg-val">{bwdMs}ms</span>
+              </div>
+              <div className="mp-anatomy-seg opt" style={{ width: `${pct(optMs)}%` }}>
+                <span className="mp-aseg-lbl">Opt</span><span className="mp-aseg-val">{optMs}ms</span>
+              </div>
+            </div>
+
+            <div className="mp-anatomy-ticks">
+              {[0, 25, 50, 75, 100].map((p, i) => (
+                <div key={p} className="mp-anatomy-tick" style={{ left: `${p}%` }}>
+                  <span className="mp-anatomy-tick-mark" />
+                  <span className="mp-anatomy-tick-lbl">{Math.round((p / 100) * totalMs)}{i === 4 ? ' ms' : ''}</span>
+                </div>
+              ))}
+            </div>
+
+            <div className="mp-anatomy-legend">
+              <div className="mp-alegend-item"><span className="mp-alegend-dot data" /><span className="mp-alegend-name">Data load</span><span className="mp-alegend-pct">{pct(dataMs).toFixed(1)}%</span></div>
+              <div className="mp-alegend-item"><span className="mp-alegend-dot fwd" /><span className="mp-alegend-name">Forward pass</span><span className="mp-alegend-pct">{pct(fwdMs).toFixed(1)}%</span></div>
+              <div className="mp-alegend-item"><span className="mp-alegend-dot bwd" /><span className="mp-alegend-name">Backward pass</span><span className="mp-alegend-pct">{pct(bwdMs).toFixed(1)}%</span></div>
+              <div className="mp-alegend-item"><span className="mp-alegend-dot opt" /><span className="mp-alegend-name">Optimizer</span><span className="mp-alegend-pct">{pct(optMs).toFixed(1)}%</span></div>
+            </div>
+
+            {/* Historical phase timings — answers "is this normal or new?" */}
+            <div style={{ marginTop: 'var(--space-6)', paddingTop: 'var(--space-5)', borderTop: '1px solid var(--border-subtle)' }}>
+              <div style={{ marginBottom: 'var(--space-3)' }}>
+                <h3 style={{ fontFamily: 'var(--font-display)', fontSize: 14, fontWeight: 500, color: 'var(--text-primary)', marginBottom: 2, letterSpacing: '-0.01em' }}>
+                  Phase timings · last 100 steps
+                </h3>
+                <p style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Track regressions over time — current frame is one point on this curve</p>
+              </div>
+
+              <div className="mp-chart-wrap">
+                <ResponsiveContainer width="100%" height={200}>
+                  <LineChart data={phaseTimingHistory} margin={{ top: 12, right: 20, bottom: 28, left: 16 }}>
+                    <CartesianGrid stroke="#1e1e24" strokeDasharray="2 4" vertical={false} />
+                    <XAxis
+                      dataKey="step"
+                      tick={{ fontFamily: 'JetBrains Mono', fontSize: 10, fill: '#71717a' }}
+                      tickLine={false}
+                      axisLine={{ stroke: '#27272f' }}
+                      tickFormatter={(v) => v >= 1000 ? `${(v / 1000).toFixed(1)}k` : v}
+                      label={{ value: 'STEP', position: 'insideBottom', offset: -14, fill: '#a1a1aa', fontSize: 10, fontFamily: 'JetBrains Mono', letterSpacing: '0.08em' }}
+                    />
+                    <YAxis
+                      tick={{ fontFamily: 'JetBrains Mono', fontSize: 10, fill: '#71717a' }}
+                      tickLine={false}
+                      axisLine={{ stroke: '#27272f' }}
+                      label={{ value: 'MS', angle: -90, position: 'insideLeft', offset: 10, fill: '#a1a1aa', fontSize: 10, fontFamily: 'JetBrains Mono', letterSpacing: '0.08em' }}
+                    />
+                    <Tooltip
+                      content={<ChartTooltip xLabel="step" formatter={(v) => `${formatNum(v, 1)} ms`} />}
+                      cursor={{ stroke: '#34343e', strokeDasharray: '2 4' }}
+                    />
+                    <Line type="monotone" dataKey="data"      name="Data load"     stroke="#71717a"        strokeWidth={1.8} dot={false} animationDuration={500} animationBegin={0} />
+                    <Line type="monotone" dataKey="forward"   name="Forward"       stroke="var(--brand-700)" strokeWidth={1.8} dot={false} animationDuration={500} animationBegin={80} />
+                    <Line type="monotone" dataKey="backward"  name="Backward"      stroke="var(--brand-500)" strokeWidth={1.8} dot={false} animationDuration={500} animationBegin={160} />
+                    <Line type="monotone" dataKey="optimizer" name="Optimizer"     stroke="var(--data-2)"    strokeWidth={1.8} dot={false} animationDuration={500} animationBegin={240} />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+              <div className="mp-chart-legend">
+                <span className="mp-chart-legend-chip"><span className="mp-chart-legend-line data-clr" />Data</span>
+                <span className="mp-chart-legend-chip"><span className="mp-chart-legend-line fwd-clr" />Forward</span>
+                <span className="mp-chart-legend-chip"><span className="mp-chart-legend-line bwd-clr" />Backward</span>
+                <span className="mp-chart-legend-chip"><span className="mp-chart-legend-line opt-clr" />Optimizer</span>
+                <span className="mp-chart-legend-delta">Data load drifted +47% in last 30 steps · investigate I/O</span>
+              </div>
+            </div>
+
+            <button
+              className="mp-btn ghost"
+              style={{ marginTop: 'var(--space-5)' }}
+              onClick={() => setPhaseDetailOpen(!phaseDetailOpen)}
+              aria-expanded={phaseDetailOpen}
+            >
+              <Eye size={12} />
+              {phaseDetailOpen ? 'Hide' : 'Show'} phase detail
+            </button>
+
+            {phaseDetailOpen && (
+              <div style={{ marginTop: 'var(--space-5)', paddingTop: 'var(--space-5)', borderTop: '1px solid var(--border-subtle)' }}>
+                <div className="mp-phase-tabs">
+                  {['compare', 'forward', 'backward'].map(p => (
+                    <button
+                      key={p}
+                      onClick={() => setPhaseView(p)}
+                      className={`mp-phase-tab ${phaseView === p ? 'active' : ''}`}
+                    >
+                      {p}
+                    </button>
+                  ))}
+                </div>
+
+                {phaseView === 'compare' && (
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--space-3)' }}>
+                    <div className="mp-phase-card">
+                      <div className="mp-phase-card-lbl">Forward</div>
+                      <div className="mp-phase-card-val">28 ms · 2,285 tok/s/GPU</div>
+                      <div className="mp-phase-card-note">Activation mem 1.8GB · GPU util 92% · FLOPS util 64%</div>
+                    </div>
+                    <div className="mp-phase-card">
+                      <div className="mp-phase-card-lbl">Backward</div>
+                      <div className="mp-phase-card-val">46 ms · 1,391 tok/s/GPU</div>
+                      <div className="mp-phase-card-note">Gradient mem 2.1GB · GPU util 88% · memory-bandwidth bound</div>
+                    </div>
+                  </div>
+                )}
+
+                {phaseView === 'forward' && (
+                  <p style={{ fontSize: 13, color: 'var(--text-secondary)', lineHeight: 1.6 }}>
+                    Forward pass runs inputs through the model. Currently <strong style={{ color: 'var(--text-primary)' }}>28ms per batch</strong> — within healthy range for a 7B dense transformer at 2048 sequence length. Compute-bound, not memory-bound.
+                  </p>
+                )}
+
+                {phaseView === 'backward' && (
+                  <p style={{ fontSize: 13, color: 'var(--text-secondary)', lineHeight: 1.6 }}>
+                    Backward pass computes gradients for every parameter. Currently <strong style={{ color: 'var(--text-primary)' }}>46ms per batch, 64% slower than forward</strong> — expected for transformers. Gradient computation is memory-bandwidth bound.
+                  </p>
+                )}
+              </div>
+            )}
+          </>
+        )}
+      </Panel>
+    </>
+  );
+};
+
+/* ═══════════════════════════════════════════════════════════════
+   PAGE: ALERTS — search + run filter + actions
+   ─────────────────────────────────────────────────────────────── */
+
+const AlertsPage = ({ onToast }) => {
+  const [filter, setFilter] = useState('all');
+  const [runFilter, setRunFilter] = useState('all');
+  const [search, setSearch] = useState('');
+  const [pendingActions, setPendingActions] = useState(new Set());
+
+  const allRunIds = useMemo(() => {
+    const set = new Set(alertStream.map(a => a.run));
+    return ['all', ...Array.from(set)];
+  }, []);
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return alertStream.filter(a => {
+      const sevMatch = filter === 'all' || a.severity === filter;
+      const runMatch = runFilter === 'all' || a.run === runFilter;
+      const searchMatch = !q
+        || a.run.toLowerCase().includes(q)
+        || a.message.toLowerCase().includes(q)
+        || a.detail.toLowerCase().includes(q)
+        || String(a.step).includes(q);
+      return sevMatch && runMatch && searchMatch;
+    });
+  }, [filter, runFilter, search]);
+
+  const severityCounts = {
+    critical: alertStream.filter(a => a.severity === 'critical').length,
+    warning: alertStream.filter(a => a.severity === 'warning').length,
+    info: alertStream.filter(a => a.severity === 'info').length,
+  };
+
+  const handleAction = (alertId, actionId, actionLabel) => {
+    const key = `${alertId}-${actionId}`;
+    setPendingActions(prev => new Set(prev).add(key));
+    onToast(`${actionLabel} queued`);
+    setTimeout(() => {
+      setPendingActions(prev => {
+        const next = new Set(prev);
+        next.delete(key);
+        return next;
+      });
+    }, 1600);
+  };
+
+  const meta = (
+    <>
+      <span className="mp-meta-chip live"><span className="mp-meta-pulse" />Live</span>
+      <span className="mp-meta-chip"><Globe2 size={10} />UTC</span>
+    </>
+  );
+
+  return (
+    <>
+      <PageHeader
+        title="Alerts"
+        subtitle="Training-relevant incidents across active runs"
+        meta={meta}
+      />
+
+      <div className="mp-stat-row">
+        <StatCell label="Critical" value={severityCounts.critical} detail="Requires immediate action" />
+        <StatCell label="Warnings" value={severityCounts.warning} detail="Monitor — may require intervention" />
+        <StatCell label="Info" value={severityCounts.info} detail="Notable events" />
+        <StatCell label="Resolved · 24h" value="14" detail="All automatic recoveries" delta="+2" deltaDir="up" />
+      </div>
+
+      <div className="mp-filter-bar">
+        <div className="mp-filter-input">
+          <Search size={12} />
+          <input
+            placeholder="Filter by run, message, or step…"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
+          {(search || filter !== 'all' || runFilter !== 'all') && (
+            <span className="mp-filter-count">{filtered.length}/{alertStream.length}</span>
+          )}
+        </div>
+        <div className="mp-filter-group">
+          {['all', 'critical', 'warning', 'info'].map(f => (
+            <button
+              key={f}
+              className={`mp-filter-chip ${filter === f ? 'active' : ''}`}
+              onClick={() => setFilter(f)}
+            >
+              {f}
+            </button>
+          ))}
+        </div>
+        <div className="mp-filter-group">
+          {allRunIds.map(r => (
+            <button
+              key={r}
+              className={`mp-filter-chip ${runFilter === r ? 'active' : ''}`}
+              onClick={() => setRunFilter(r)}
+              title={r === 'all' ? 'All runs' : r}
+            >
+              {r === 'all' ? 'all runs' : r.split('/')[0]}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {filtered.length === 0 ? (
+        <div className="mp-empty">
+          No alerts match the current filters.
+          <div className="mp-empty-mono">Try clearing the search or filter chips.</div>
+        </div>
+      ) : (
+        <div>
+          {filtered.map(alert => (
+            <div key={alert.id} className={`mp-alert-row ${alert.severity}`}>
+              <div className="mp-alert-icon">
+                {alert.severity === 'critical' && <XCircle size={16} />}
+                {alert.severity === 'warning' && <AlertTriangle size={16} />}
+                {alert.severity === 'info' && <Info size={16} />}
+              </div>
+              <div className="mp-alert-body">
+                <span className="mp-alert-title">{alert.message}</span>
+                <span className="mp-alert-detail">{alert.detail}</span>
+                {alert.resolution && (
+                  <div className="mp-alert-resolution">
+                    <div className="mp-alert-resolution-text">
+                      <strong>Resolution</strong>
+                      <span>{alert.resolution}</span>
+                    </div>
+                    {alert.actions && alert.actions.length > 0 && (
+                      <div className="mp-alert-actions">
+                        {alert.actions.map(action => {
+                          const key = `${alert.id}-${action.id}`;
+                          const isPending = pendingActions.has(key);
+                          return (
+                            <button
+                              key={action.id}
+                              className={`mp-btn sm ${isPending ? 'success-flash' : ''}`}
+                              onClick={() => handleAction(alert.id, action.id, action.label)}
+                              disabled={isPending}
+                            >
+                              {isPending ? <CheckCircle2 size={12} /> : <ActionIcon name={action.icon} />}
+                              {isPending ? 'Queued' : action.label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+              <div className="mp-alert-meta">
+                <span className="mp-alert-meta-run">{alert.run}</span>
+                <span>step {alert.step.toLocaleString()}</span>
+                <span>{alert.timestamp}</span>
+              </div>
+              <ChevronRight size={14} color="var(--text-tertiary)" />
+            </div>
+          ))}
+        </div>
+      )}
+    </>
+  );
+};
+
+/* ═══════════════════════════════════════════════════════════════
+   PAGE: DATA INTEGRITY — sparklines per row
+   ─────────────────────────────────────────────────────────────── */
+
+const DataIntegrityPage = () => {
+  const [expanded, setExpanded] = useState(null);
+
+  const klStatus = (kl) => kl > 1.0 ? 'crit' : kl > 0.5 ? 'warn' : 'ok';
+  const klBarWidth = (kl) => Math.min(100, (kl / 1.5) * 100);
+  const klColor = (status) => status === 'crit' ? '#ef4444' : status === 'warn' ? '#f59e0b' : '#10b981';
+
+  const meta = (
+    <>
+      <span className="mp-meta-chip live"><span className="mp-meta-pulse" />Updated 14m ago</span>
+      <span className="mp-meta-chip"><Globe2 size={10} />UTC</span>
+    </>
+  );
+
+  return (
+    <>
+      <PageHeader
+        title="Data integrity"
+        subtitle="Training distribution monitoring — catch silent pipeline bugs"
+        meta={meta}
+      />
+
+      <div className="mp-stat-row">
+        <StatCell label="Features tracked" value={dataIntegrityFeatures.length} detail="Input + training signals" />
+        <StatCell
+          label="Within thresholds"
+          value={dataIntegrityFeatures.filter(f => f.status === 'ok').length}
+          detail="KL < 0.5" delta="Healthy" deltaDir="up"
+        />
+        <StatCell
+          label="Drifted"
+          value={dataIntegrityFeatures.filter(f => f.status !== 'ok').length}
+          detail="1 warn, 1 critical" delta="+1" deltaDir="down"
+        />
+        <StatCell label="Sample size" value="2.4M" detail="Last 12h window" />
+      </div>
+
+      <Panel
+        title="Feature distribution stability"
+        description="KL divergence between current training distribution and the epoch baseline. Sparkline shows last 24h trend."
+      >
+        <div className="mp-feature-table">
+          <div className="mp-feature-table-header">
+            <span>Feature</span>
+            <span>Domain</span>
+            <span>KL divergence</span>
+            <span>24h trend</span>
+            <span>Samples</span>
+            <span></span>
+            <span></span>
+          </div>
+          {dataIntegrityFeatures.map(f => {
+            const status = klStatus(f.kl);
+            const isOpen = expanded === f.name;
+            return (
+              <div key={f.name} className="mp-feature-row">
+                <div
+                  className="mp-feature-row-head"
+                  onClick={() => setExpanded(isOpen ? null : f.name)}
+                  tabIndex={0}
+                  role="button"
+                  aria-expanded={isOpen}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      setExpanded(isOpen ? null : f.name);
+                    }
+                  }}
+                >
+                  <span className="mp-feature-name">{f.name}</span>
+                  <span className="mp-feature-domain">{f.domain}</span>
+                  <div className="mp-feature-kl-cell">
+                    <div className="mp-feature-kl-bar">
+                      <div
+                        className={`mp-feature-kl-fill ${status}`}
+                        style={{ width: `${klBarWidth(f.kl)}%` }}
+                      />
+                    </div>
+                    <span className={`mp-feature-stat ${status === 'warn' ? 'high' : status === 'crit' ? 'critical' : ''}`}>
+                      {f.kl.toFixed(2)}
+                    </span>
+                  </div>
+                  <Sparkline data={klHistory[f.name]} color={klColor(status)} />
+                  <span className="mp-feature-stat" style={{ textAlign: 'left' }}>
+                    {(f.sampleCount / 1000).toFixed(0)}k
+                  </span>
+                  <span className={`mp-feature-status ${f.status}`} />
+                  <ChevronRight size={14} className={`mp-feature-chevron ${isOpen ? 'open' : ''}`} />
+                </div>
+                {isOpen && (
+                  <div className="mp-feature-row-expand">
+                    <div className="mp-feature-expand-item">
+                      <span className="mp-feature-expand-lbl">KL divergence</span>
+                      <span className="mp-feature-expand-val">{f.kl.toFixed(3)}</span>
+                    </div>
+                    <div className="mp-feature-expand-item">
+                      <span className="mp-feature-expand-lbl">PSI</span>
+                      <span className="mp-feature-expand-val">{f.psi.toFixed(3)}</span>
+                    </div>
+                    <div className="mp-feature-expand-item">
+                      <span className="mp-feature-expand-lbl">JS divergence</span>
+                      <span className="mp-feature-expand-val">{f.js.toFixed(3)}</span>
+                    </div>
+                    <div className="mp-feature-expand-note">{f.note}</div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+        <div className="mp-insight-row">
+          <AlertTriangle size={14} className="mp-insight-icon warn" />
+          <span>
+            <strong style={{ color: 'var(--text-primary)' }}>gradient_magnitude</strong> drifted sharply in last 6h — KL 1.24 vs baseline. Likely cause: learning-rate schedule change at step 8,000 (expected). Sparkline confirms abrupt onset.
+          </span>
+        </div>
+      </Panel>
+    </>
+  );
+};
+
+/* ═══════════════════════════════════════════════════════════════
+   PAGE: LOGS — live streaming with pause / autoscroll / cap
+   ─────────────────────────────────────────────────────────────── */
+
+const LOG_BUFFER_CAP = 200;
+
+const LogsPage = () => {
+  const [filter, setFilter] = useState('all');
+  const [search, setSearch] = useState('');
+  const [logs, setLogs] = useState(initialLogs);
+  const [paused, setPaused] = useState(false);
+  const [autoScroll, setAutoScroll] = useState(true);
+  const [freshIds, setFreshIds] = useState(new Set());
+  const streamRef = useRef(null);
+  const containerRef = useRef(null);
+
+  // Live stream
+  useEffect(() => {
+    if (paused) return;
+    const tick = () => {
+      const delay = 800 + Math.random() * 1700;
+      streamRef.current = setTimeout(() => {
+        const newLog = generateLogLine();
+        setLogs(prev => [newLog, ...prev].slice(0, LOG_BUFFER_CAP));
+        setFreshIds(prev => {
+          const next = new Set(prev);
+          next.add(newLog.id);
+          return next;
+        });
+        // Clear fresh flag after animation
+        setTimeout(() => {
+          setFreshIds(prev => {
+            const next = new Set(prev);
+            next.delete(newLog.id);
+            return next;
+          });
+        }, 300);
+        tick();
+      }, delay);
+    };
+    tick();
+    return () => {
+      if (streamRef.current) clearTimeout(streamRef.current);
+    };
+  }, [paused]);
+
+  // Auto-scroll to top (newest log) when enabled
+  useEffect(() => {
+    if (autoScroll && containerRef.current) {
+      containerRef.current.scrollTop = 0;
+    }
+  }, [logs, autoScroll]);
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return logs.filter(l => {
+      const levelMatch = filter === 'all' || l.level === filter;
+      const searchMatch = !q
+        || l.msg.toLowerCase().includes(q)
+        || l.run.toLowerCase().includes(q)
+        || `r${l.rank}`.includes(q);
+      return levelMatch && searchMatch;
+    });
+  }, [logs, filter, search]);
+
+  const meta = paused ? (
+    <>
+      <span className="mp-meta-chip stale"><Pause size={10} />Paused</span>
+      <span className="mp-meta-chip"><Globe2 size={10} />UTC</span>
+    </>
+  ) : (
+    <>
+      <span className="mp-meta-chip live"><span className="mp-meta-pulse" />Streaming</span>
+      <span className="mp-meta-chip"><Globe2 size={10} />UTC</span>
+    </>
+  );
+
+  return (
+    <>
+      <PageHeader title="Logs" subtitle="Live stream across all active runs" meta={meta} />
+
+      <div className="mp-log-toolbar">
+        <button
+          className="mp-btn"
+          onClick={() => setPaused(!paused)}
+          aria-pressed={paused}
+        >
+          {paused ? <><Play size={12} />Resume</> : <><Pause size={12} />Pause</>}
+        </button>
+        <button
+          className={`mp-btn ${autoScroll ? '' : 'ghost'}`}
+          onClick={() => setAutoScroll(!autoScroll)}
+          aria-pressed={autoScroll}
+        >
+          <ArrowDown size={12} />
+          Auto-scroll {autoScroll ? 'on' : 'off'}
+        </button>
+        <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-tertiary)' }}>
+          {logs.length} / {LOG_BUFFER_CAP} buffered
+        </span>
+        <div className="mp-log-toolbar-spacer" />
+        {paused && (
+          <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--status-warn)', letterSpacing: '0.06em', textTransform: 'uppercase' }}>
+            Stream paused
+          </span>
+        )}
+      </div>
+
+      <div className="mp-filter-bar">
+        <div className="mp-filter-input">
+          <Search size={12} />
+          <input
+            placeholder="Filter logs by message, rank, or run…"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
+          {(search || filter !== 'all') && (
+            <span className="mp-filter-count">{filtered.length}/{logs.length}</span>
+          )}
+        </div>
+        <div className="mp-filter-group">
+          {['all', 'info', 'warn', 'error'].map(f => (
+            <button
+              key={f}
+              className={`mp-filter-chip ${filter === f ? 'active' : ''}`}
+              onClick={() => setFilter(f)}
+            >
+              {f}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="mp-log-stream" ref={containerRef}>
+        <div className="mp-log-stream-header">
+          <span>TIMESTAMP</span>
+          <span style={{ textAlign: 'center' }}>LEVEL</span>
+          <span>RANK</span>
+          <span>RUN</span>
+          <span>MESSAGE</span>
+        </div>
+        {filtered.length === 0 ? (
+          <div className="mp-empty" style={{ border: 'none', borderRadius: 0, margin: 0 }}>
+            No log lines match.
+            <div className="mp-empty-mono">Try clearing the search or level filter.</div>
+          </div>
+        ) : (
+          filtered.map((log) => (
+            <div key={log.id} className={`mp-log-row ${freshIds.has(log.id) ? 'fresh' : ''}`}>
+              <span className="mp-log-ts">{log.ts}</span>
+              <span className={`mp-log-level ${log.level}`}>{log.level.toUpperCase()}</span>
+              <span className="mp-log-rank">r{log.rank}</span>
+              <span className="mp-log-run">{log.run}</span>
+              <span className="mp-log-msg">{log.msg}</span>
+            </div>
+          ))
+        )}
+      </div>
+    </>
+  );
+};
+
+/* ═══════════════════════════════════════════════════════════════
+   PAGE: SETTINGS — Display, Notifications, Integrations, API
+   ─────────────────────────────────────────────────────────────── */
+
+const Toggle = ({ on, onChange, ariaLabel = null }) => (
+  <button
+    className={`mp-toggle ${on ? 'on' : ''}`}
+    onClick={() => onChange(!on)}
+    aria-pressed={on}
+    aria-label={ariaLabel}
+    type="button"
+  />
+);
+
+const Segmented = ({ value, options, onChange }) => (
+  <div className="mp-seg">
+    {options.map(opt => (
+      <button
+        key={opt.value}
+        className={`mp-seg-btn ${value === opt.value ? 'active' : ''}`}
+        onClick={() => onChange(opt.value)}
+        type="button"
+      >
+        {opt.label}
+      </button>
+    ))}
+  </div>
+);
+
+const FormRow = ({ label, help, children }) => (
+  <div className="mp-form-row">
+    <div className="mp-form-label-block">
+      <span className="mp-form-label">{label}</span>
+      {help && <span className="mp-form-help">{help}</span>}
+    </div>
+    {children}
+  </div>
+);
+
+const DisplaySection = ({ display, setDisplay }) => (
+  <Panel title="Display" description="How ModelPulse renders for you">
+    <FormRow label="Theme" help="Light theme is on the roadmap.">
+      <Segmented
+        value={display.theme}
+        options={[
+          { value: 'dark', label: 'Dark' },
+          { value: 'light', label: 'Light · soon' },
+          { value: 'system', label: 'System' },
+        ]}
+        onChange={(v) => setDisplay({ ...display, theme: v })}
+      />
+    </FormRow>
+    <FormRow label="Default timezone" help="Affects timestamps everywhere except logs (always UTC for forensics).">
+      <select
+        className="mp-select"
+        value={display.timezone}
+        onChange={(e) => setDisplay({ ...display, timezone: e.target.value })}
+      >
+        <option value="UTC">UTC</option>
+        <option value="local">Local (device)</option>
+        <option value="America/Los_Angeles">America/Los_Angeles</option>
+        <option value="America/New_York">America/New_York</option>
+        <option value="Europe/London">Europe/London</option>
+        <option value="Asia/Tokyo">Asia/Tokyo</option>
+      </select>
+    </FormRow>
+    <FormRow label="Density" help="Comfortable adds breathing room; compact fits more data per screen.">
+      <Segmented
+        value={display.density}
+        options={[
+          { value: 'comfortable', label: 'Comfortable' },
+          { value: 'compact', label: 'Compact' },
+        ]}
+        onChange={(v) => setDisplay({ ...display, density: v })}
+      />
+    </FormRow>
+    <FormRow label="Numerical precision" help="Decimal places for loss, gradient norm, divergence metrics.">
+      <Segmented
+        value={display.precision}
+        options={[
+          { value: '2', label: '2' },
+          { value: '3', label: '3' },
+          { value: '4', label: '4' },
+        ]}
+        onChange={(v) => setDisplay({ ...display, precision: v })}
+      />
+    </FormRow>
+    <FormRow label="Reduce motion" help="Disable chart entry animations and pulse effects.">
+      <Toggle
+        on={display.reduceMotion}
+        onChange={(v) => setDisplay({ ...display, reduceMotion: v })}
+        ariaLabel="Reduce motion"
+      />
+    </FormRow>
+  </Panel>
+);
+
+const NotificationsSection = ({ routing, setRouting, channels, setChannels }) => {
+  const channelLabels = { email: 'Email', slack: 'Slack', pagerduty: 'PagerDuty' };
+  const severityLabels = { critical: 'Critical', warning: 'Warning', info: 'Info' };
+
+  const toggle = (severity, channel) => {
+    setRouting({
+      ...routing,
+      [severity]: { ...routing[severity], [channel]: !routing[severity][channel] }
+    });
+  };
+
+  return (
+    <Panel
+      title="Alert routing"
+      description="Where each severity level should be delivered. Critical events page, warnings notify, info is logged."
+    >
+      <div className="mp-routing-table">
+        <div className="mp-routing-header">
+          <span>Severity</span>
+          <span>{channelLabels.email}</span>
+          <span>{channelLabels.slack}</span>
+          <span>{channelLabels.pagerduty}</span>
+        </div>
+        {['critical', 'warning', 'info'].map(sev => (
+          <div key={sev} className="mp-routing-row">
+            <span className={`mp-routing-severity ${sev}`}>
+              {sev === 'critical' && <XCircle size={12} />}
+              {sev === 'warning' && <AlertTriangle size={12} />}
+              {sev === 'info' && <Info size={12} />}
+              {severityLabels[sev]}
+            </span>
+            {['email', 'slack', 'pagerduty'].map(ch => (
+              <div key={ch} className="mp-routing-cell">
+                <Toggle
+                  on={routing[sev][ch]}
+                  onChange={() => toggle(sev, ch)}
+                  ariaLabel={`${severityLabels[sev]} via ${channelLabels[ch]}`}
+                />
+              </div>
+            ))}
+          </div>
+        ))}
+      </div>
+
+      <div style={{ marginTop: 'var(--space-6)' }}>
+        <FormRow
+          label="Slack channel · critical + warning"
+          help="Channel for severity-routed Slack notifications."
+        >
+          <input
+            className="mp-text-input"
+            value={channels.slack}
+            onChange={(e) => setChannels({ ...channels, slack: e.target.value })}
+            placeholder="#training-alerts"
+          />
+        </FormRow>
+        <FormRow
+          label="Slack channel · info"
+          help="Lower-priority informational events go here."
+        >
+          <input
+            className="mp-text-input"
+            value={channels.slackInfo}
+            onChange={(e) => setChannels({ ...channels, slackInfo: e.target.value })}
+            placeholder="#training-info"
+          />
+        </FormRow>
+        <FormRow
+          label="PagerDuty service"
+          help="Only critical alerts page. Warnings never escalate to PagerDuty."
+        >
+          <input
+            className="mp-text-input"
+            value={channels.pagerduty}
+            onChange={(e) => setChannels({ ...channels, pagerduty: e.target.value })}
+            placeholder="training-oncall"
+          />
+        </FormRow>
+        <FormRow
+          label="Email recipients"
+          help="Comma-separated list. Defaults to workspace admins."
+        >
+          <input
+            className="mp-text-input"
+            style={{ minWidth: 280 }}
+            value={channels.email}
+            onChange={(e) => setChannels({ ...channels, email: e.target.value })}
+            placeholder="research-team@anthropic.com"
+          />
+        </FormRow>
+      </div>
+    </Panel>
+  );
+};
+
+const integrations = [
+  { id: 'slack',     name: 'Slack',           avatar: 'SL', gradient: 'linear-gradient(135deg, #4a154b, #ecb22e)', meta: '2 channels · last event 12m ago', connected: true },
+  { id: 'pagerduty', name: 'PagerDuty',       avatar: 'PD', gradient: 'linear-gradient(135deg, #06ac38, #024d1d)', meta: '1 service · 0 active incidents', connected: true },
+  { id: 's3',        name: 'S3 checkpoints',  avatar: 'S3', gradient: 'linear-gradient(135deg, #569a31, #2d5417)', meta: 'Bucket models-checkpoints · 47 GB used', connected: true },
+  { id: 'wandb',     name: 'Weights & Biases',avatar: 'WB', gradient: 'linear-gradient(135deg, #ffcc33, #fcb003)', meta: 'Experiment tracking sync', connected: false },
+];
+
+const IntegrationsSection = ({ onToast }) => {
+  const [conn, setConn] = useState(
+    Object.fromEntries(integrations.map(i => [i.id, i.connected]))
+  );
+  const handleClick = (id, name, currentlyConnected) => {
+    setConn({ ...conn, [id]: !currentlyConnected });
+    onToast(currentlyConnected ? `${name} disconnected` : `${name} connected`);
+  };
+  return (
+    <Panel
+      title="Integrations"
+      description="External services that power alerts and data sync"
+    >
+      <div className="mp-int-grid">
+        {integrations.map(int => {
+          const isConnected = conn[int.id];
+          return (
+            <div key={int.id} className="mp-int-card">
+              <div className="mp-int-head">
+                <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                  <div
+                    style={{
+                      width: 36, height: 36,
+                      borderRadius: 'var(--radius-sm)',
+                      background: int.gradient,
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      fontFamily: 'var(--font-mono)',
+                      fontSize: 12, fontWeight: 700,
+                      color: 'white',
+                    }}
+                  >
+                    {int.avatar}
+                  </div>
+                  <div>
+                    <div className="mp-int-name">{int.name}</div>
+                    <div className="mp-int-meta">{isConnected ? int.meta : 'Not connected'}</div>
+                  </div>
+                </div>
+                <span className={`mp-int-status ${isConnected ? 'connected' : 'disconnected'}`}>
+                  {isConnected ? 'Connected' : 'Inactive'}
+                </span>
+              </div>
+              <div style={{ display: 'flex', gap: 8 }}>
+                {isConnected ? (
+                  <>
+                    <button className="mp-btn sm" onClick={() => onToast(`${int.name} settings`)}>
+                      Configure
+                    </button>
+                    <button
+                      className="mp-btn sm danger"
+                      onClick={() => handleClick(int.id, int.name, true)}
+                    >
+                      Disconnect
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    className="mp-btn sm"
+                    onClick={() => handleClick(int.id, int.name, false)}
+                  >
+                    <Plus size={12} />
+                    Connect
+                  </button>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </Panel>
+  );
+};
+
+const initialTokens = [
+  { id: 't1', name: 'production-api-readonly', secret: 'mp_pat_••••••••3f9a', created: '14d ago', lastUsed: '2h ago', perms: 'read' },
+  { id: 't2', name: 'ci-pipeline',             secret: 'mp_pat_••••••••8b21', created: '30d ago', lastUsed: '8m ago', perms: 'read+write' },
+  { id: 't3', name: 'm-chen-laptop',           secret: 'mp_pat_••••••••a45c', created: '6d ago',  lastUsed: '1d ago', perms: 'read' },
+];
+
+const ApiSection = ({ onToast }) => {
+  const [tokens, setTokens] = useState(initialTokens);
+
+  const revoke = (id, name) => {
+    setTokens(tokens.filter(t => t.id !== id));
+    onToast(`Token ${name} revoked`);
+  };
+
+  const generate = () => {
+    const id = `t-${Date.now()}`;
+    const name = `new-token-${tokens.length + 1}`;
+    setTokens([
+      { id, name, secret: `mp_pat_••••••••${Math.random().toString(36).slice(-4)}`, created: 'just now', lastUsed: '—', perms: 'read' },
+      ...tokens,
+    ]);
+    onToast(`Token ${name} created`);
+  };
+
+  return (
+    <Panel
+      title="API access"
+      description="Personal access tokens for programmatic access. Tokens are shown once at creation, never again."
+      action={
+        <button className="mp-btn" onClick={generate}>
+          <Plus size={12} />
+          Generate token
+        </button>
+      }
+    >
+      {tokens.length === 0 ? (
+        <div className="mp-empty">
+          No active tokens.
+          <div className="mp-empty-mono">Generate one to start using the API.</div>
+        </div>
+      ) : (
+        <div className="mp-token-table">
+          <div className="mp-token-header">
+            <span>Name / Secret</span>
+            <span>Created</span>
+            <span>Last used</span>
+            <span>Permissions</span>
+            <span></span>
+          </div>
+          {tokens.map(token => (
+            <div key={token.id} className="mp-token-row">
+              <div>
+                <div className="mp-token-name">{token.name}</div>
+                <div className="mp-token-secret">{token.secret}</div>
+              </div>
+              <span className="mp-token-meta">{token.created}</span>
+              <span className="mp-token-meta">{token.lastUsed}</span>
+              <span className={`mp-token-perm ${token.perms.includes('write') ? 'write' : ''}`}>
+                {token.perms}
+              </span>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button
+                  className="mp-btn sm ghost"
+                  onClick={() => onToast(`Token ${token.name} copied`)}
+                  aria-label={`Copy ${token.name}`}
+                >
+                  <Copy size={12} />
+                </button>
+                <button
+                  className="mp-btn sm danger"
+                  onClick={() => revoke(token.id, token.name)}
+                >
+                  Revoke
+                </button>
               </div>
             </div>
           ))}
         </div>
-      </div>
-    </div>
-  );
-};
-
-// Enhanced Training Page Component (ONLY THIS IS REPLACED)
-const TrainingPage = () => {
-  const [selectedPhase, setSelectedPhase] = useState('combined');
-  const currentData = trainingData[trainingData.length - 1];
-  const totalIterationTime = currentData.forwardTime + currentData.backwardTime;
-  const batchSize = 64;
-  const forwardSamplesPerSecond = Math.round((batchSize * 1000) / currentData.forwardTime);
-  const backwardSamplesPerSecond = Math.round((batchSize * 1000) / currentData.backwardTime);
-  const effectiveSamplesPerSecond = Math.round((batchSize * 1000) / totalIterationTime);
-  const peakMemory = 2.1;
-
-  return (
-    <div className="page-content">
-      <div className="page-header">
-        <h2>Model Training</h2>
-        <p>Real-time training progress with forward/backward pass performance insights</p>
-      </div>
-
-      {/* Enhanced Training Status Banner */}
-      <div className="enhanced-training-banner">
-        <div className="banner-content">
-          <div className="banner-icon">
-            <Activity size={20} />
-          </div>
-          <div className="banner-text">
-            <strong>Training in Progress:</strong> Step 800/1000 (80.0% complete) | ETA: 45 minutes
-          </div>
-          <button className="banner-button">Monitor Live</button>
-        </div>
-      </div>
-
-      {/* Enhanced Performance Grid */}
-      <div className="enhanced-performance-grid">
-        <div className="performance-header">
-          <h3>Training Performance Breakdown</h3>
-          <div className="phase-selector">
-            {['combined', 'forward', 'backward'].map(phase => (
-              <button 
-                key={phase}
-                className={`phase-btn ${selectedPhase === phase ? 'active' : ''}`}
-                onClick={() => setSelectedPhase(phase)}
-              >
-                {phase === 'combined' ? 'Overview' : phase === 'forward' ? 'Forward Pass' : 'Backward Pass'}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        {selectedPhase === 'combined' && (
-          <div className="performance-overview">
-            {/* Performance Summary Stats */}
-            <div className="performance-summary">
-              <div className="summary-stat">
-                <span className="stat-label">Total Time</span>
-                <span className="stat-value">{totalIterationTime}ms</span>
-                <span className="stat-detail">per iteration</span>
-              </div>
-              <div className="summary-stat">
-                <span className="stat-label">Effective Throughput</span>
-                <span className="stat-value">{effectiveSamplesPerSecond.toLocaleString()}</span>
-                <span className="stat-detail">samples/sec</span>
-              </div>
-              <div className="summary-stat">
-                <span className="stat-label">Peak Memory</span>
-                <span className="stat-value">{peakMemory}GB</span>
-                <span className="stat-detail">of 12.8GB</span>
-              </div>
-              <div className="summary-stat">
-                <span className="stat-label">Avg GPU Usage</span>
-                <span className="stat-value">90%</span>
-                <span className="stat-detail">utilization</span>
-              </div>
-            </div>
-            
-            {/* Phase Comparison */}
-            <div className="phase-comparison">
-              <div className="phase-card forward">
-                <div className="phase-header">
-                  <h4>🟢 Forward Pass</h4>
-                  <span className="phase-time">{currentData.forwardTime}ms</span>
-                </div>
-                <div className="phase-metrics">
-                  <div className="phase-metric">
-                    <span>Throughput</span>
-                    <span>{forwardSamplesPerSecond.toLocaleString()}/s</span>
-                  </div>
-                  <div className="phase-metric">
-                    <span>Memory</span>
-                    <span>1.8GB</span>
-                  </div>
-                  <div className="phase-metric">
-                    <span>GPU</span>
-                    <span>92%</span>
-                  </div>
-                </div>
-              </div>
-
-              <div className="phase-card backward">
-                <div className="phase-header">
-                  <h4>🔴 Backward Pass</h4>
-                  <span className="phase-time">{currentData.backwardTime}ms</span>
-                </div>
-                <div className="phase-metrics">
-                  <div className="phase-metric">
-                    <span>Throughput</span>
-                    <span>{backwardSamplesPerSecond.toLocaleString()}/s</span>
-                  </div>
-                  <div className="phase-metric">
-                    <span>Memory</span>
-                    <span>2.1GB</span>
-                  </div>
-                  <div className="phase-metric">
-                    <span>GPU</span>
-                    <span>88%</span>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            {/* Performance Insight */}
-            <div className="performance-insight">
-              <div className="insight-icon">⚖️</div>
-              <div className="insight-content">
-                <h4>Well Optimized</h4>
-                <p>Current settings are near optimal for this model architecture.</p>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {(selectedPhase === 'forward' || selectedPhase === 'backward') && (
-          <div className={`phase-detail ${selectedPhase}`}>
-            <div className="detail-header">
-              <h4>{selectedPhase === 'forward' ? '🟢 Forward Pass Deep Dive' : '🔴 Backward Pass Deep Dive'}</h4>
-              <div className="detail-status">
-                <span className="status-badge good">Optimized</span>
-              </div>
-            </div>
-            
-            <div className="detail-grid">
-              <div className="detail-card">
-                <h5>Performance</h5>
-                <div className="detail-metrics">
-                  <div className="detail-metric">
-                    <span>Time per iteration</span>
-                    <span className="metric-highlight">
-                      {selectedPhase === 'forward' ? currentData.forwardTime : currentData.backwardTime}ms
-                    </span>
-                  </div>
-                  <div className="detail-metric">
-                    <span>Samples processed</span>
-                    <span>
-                      {selectedPhase === 'forward' ? forwardSamplesPerSecond.toLocaleString() : backwardSamplesPerSecond.toLocaleString()}/sec
-                    </span>
-                  </div>
-                </div>
-              </div>
-
-              <div className="detail-card">
-                <h5>Resource Usage</h5>
-                <div className="detail-metrics">
-                  <div className="detail-metric">
-                    <span>Memory consumption</span>
-                    <span className="metric-highlight">{selectedPhase === 'forward' ? '1.8' : '2.1'}GB</span>
-                  </div>
-                  <div className="detail-metric">
-                    <span>GPU utilization</span>
-                    <span>{selectedPhase === 'forward' ? '92' : '88'}%</span>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div className="optimization-suggestions">
-              <h5>Optimization Opportunities</h5>
-              <div className="suggestions-list">
-                <div className="suggestion-item good">
-                  <span>✅ {selectedPhase} pass is well optimized</span>
-                </div>
-                <div className="suggestion-item info">
-                  <span>💡 Performance is within optimal range</span>
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* Key Training Metrics */}
-      <div className="metrics-summary">
-        <MetricCard 
-          title="Current Accuracy" 
-          value={(currentData.accuracy * 100).toFixed(1)} 
-          unit="%" 
-          threshold="90"
-          trend={1.2}
-          status={currentData.accuracy > 0.9 ? 'good' : 'warning'}
-        />
-        <MetricCard 
-          title="Training Loss" 
-          value={currentData.loss.toFixed(3)} 
-          unit="" 
-          threshold="0.2"
-          trend={-2.8}
-          status={currentData.loss < 0.2 ? 'good' : 'warning'}
-        />
-        <MetricCard 
-          title="Peak Memory" 
-          value={peakMemory.toFixed(1)} 
-          unit="GB" 
-          threshold="10.0"
-          trend={0.1}
-          status={peakMemory < 10 ? 'good' : 'warning'}
-        />
-        <MetricCard 
-          title="Effective Throughput" 
-          value={effectiveSamplesPerSecond.toLocaleString()} 
-          unit=" samples/s" 
-          trend={0.8}
-          status="good"
-        />
-      </div>
-      
-      {/* Enhanced Training Charts */}
-      <div className="training-enhanced-grid">
-        <div className="chart-container large">
-          <div className="chart-header">
-            <h3>TRAINING & VALIDATION CURVES</h3>
-            <div className="chart-actions">
-              <span className="status-indicator good">Converging Well</span>
-            </div>
-          </div>
-          <ResponsiveContainer width="100%" height="80%">
-            <LineChart data={trainingData}>
-              <XAxis dataKey="step" axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: '#9CA3AF' }} />
-              <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: '#9CA3AF' }} />
-              <Line type="monotone" dataKey="accuracy" stroke="#10b981" strokeWidth={3} dot={false} name="Train Accuracy" />
-              <Line type="monotone" dataKey="loss" stroke="#ef4444" strokeWidth={3} dot={false} name="Train Loss" />
-            </LineChart>
-          </ResponsiveContainer>
-          <div className="chart-insight">
-            <CheckCircle size={14} />
-            <span>Training converging well. No overfitting detected.</span>
-          </div>
-        </div>
-
-        <div className="chart-container">
-          <div className="chart-header">
-            <h3>FORWARD vs BACKWARD PERFORMANCE</h3>
-            <div className="chart-actions">
-              <span className="status-indicator good">Optimized</span>
-            </div>
-          </div>
-          <ResponsiveContainer width="100%" height="80%">
-            <LineChart data={trainingData}>
-              <XAxis dataKey="step" axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: '#9CA3AF' }} />
-              <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: '#9CA3AF' }} />
-              <Line type="monotone" dataKey="forwardTime" stroke="#10b981" strokeWidth={3} dot={false} name="Forward Time" />
-              <Line type="monotone" dataKey="backwardTime" stroke="#ef4444" strokeWidth={3} dot={false} name="Backward Time" />
-            </LineChart>
-          </ResponsiveContainer>
-          <div className="chart-insight">
-            <Zap size={14} />
-            <span>Forward and backward passes are well balanced and optimized.</span>
-          </div>
-        </div>
-      </div>
-
-      {/* Training Recommendations */}
-      <div className="training-recommendations">
-        <h3>Training Optimizations & Insights</h3>
-        <div className="recommendations-grid">
-          <div className="recommendation-card info">
-            <div className="recommendation-icon">
-              <TrendingUp size={20} />
-            </div>
-            <div className="recommendation-content">
-              <h4>Performance Excellent</h4>
-              <p>Current settings are near optimal. Training is proceeding efficiently with balanced resource usage.</p>
-              <button className="recommendation-action">Schedule Checkpoint</button>
-            </div>
-          </div>
-          
-          <div className="recommendation-card info">
-            <div className="recommendation-icon">
-              <Clock size={20} />
-            </div>
-            <div className="recommendation-content">
-              <h4>Memory Efficiency</h4>
-              <p>Peak memory usage at {peakMemory}GB out of 12.8GB available. Excellent headroom for larger batches.</p>
-              <button className="recommendation-action">Monitor Efficiency</button>
-            </div>
-          </div>
-
-          <div className="recommendation-card info">
-            <div className="recommendation-icon">
-              <Activity size={20} />
-            </div>
-            <div className="recommendation-content">
-              <h4>GPU Utilization</h4>
-              <p>Forward: 92%, Backward: 88%. Excellent resource utilization across training phases.</p>
-              <button className="recommendation-action">Maintain Settings</button>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-};
-
-// Enhanced Spatial Page Component with 3D Globe and Deployment Monitoring
-const SpatialPage = () => {
-  const [selectedDeployment, setSelectedDeployment] = useState(null);
-  const [globeRotation, setGlobeRotation] = useState(true);
-  const [globeView, setGlobeView] = useState('3d'); // '3d' or 'flat'
-  const globeRef = useRef();
-
-  useEffect(() => {
-    if (!globeRef.current || globeView === 'flat') return;
-
-    // Initialize Three.js scene for globe
-    const scene = new THREE.Scene();
-    const camera = new THREE.PerspectiveCamera(75, globeRef.current.offsetWidth / globeRef.current.offsetHeight, 0.1, 1000);
-    const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
-    
-    renderer.setSize(globeRef.current.offsetWidth, globeRef.current.offsetHeight);
-    renderer.setClearColor(0x000000, 0);
-    globeRef.current.appendChild(renderer.domElement);
-
-    // Create enhanced globe geometry with better wireframe
-    const geometry = new THREE.SphereGeometry(2, 64, 32);
-    const material = new THREE.MeshBasicMaterial({
-      color: 0x2a2a2a,
-      wireframe: true,
-      transparent: true,
-      opacity: 0.4
-    });
-    const globe = new THREE.Mesh(geometry, material);
-    scene.add(globe);
-
-    // Add deployment points with enhanced visibility
-    deploymentData.forEach(deployment => {
-      const phi = (90 - deployment.lat) * (Math.PI / 180);
-      const theta = (deployment.lng + 180) * (Math.PI / 180);
-      
-      const x = -(2.1 * Math.sin(phi) * Math.cos(theta));
-      const z = (2.1 * Math.sin(phi) * Math.sin(theta));
-      const y = (2.1 * Math.cos(phi));
-
-      // Main deployment point
-      const pointGeometry = new THREE.SphereGeometry(0.08, 16, 16);
-      let pointColor = 0x10b981; // green for healthy
-      if (deployment.status === 'warning') pointColor = 0xf59e0b; // yellow for warning
-      if (deployment.status === 'error') pointColor = 0xef4444; // red for error
-
-      const pointMaterial = new THREE.MeshBasicMaterial({ 
-        color: pointColor,
-        transparent: true,
-        opacity: 0.9
-      });
-      const point = new THREE.Mesh(pointGeometry, pointMaterial);
-      point.position.set(x, y, z);
-      point.userData = deployment;
-      scene.add(point);
-
-      // Add glowing effect for better visibility
-      const glowGeometry = new THREE.SphereGeometry(0.12, 16, 16);
-      const glowMaterial = new THREE.MeshBasicMaterial({
-        color: pointColor,
-        transparent: true,
-        opacity: 0.3
-      });
-      const glow = new THREE.Mesh(glowGeometry, glowMaterial);
-      glow.position.set(x, y, z);
-      scene.add(glow);
-    });
-
-    camera.position.z = 5;
-    camera.position.y = 1;
-
-    let animationId;
-    // Animation loop
-    function animate() {
-      animationId = requestAnimationFrame(animate);
-      if (globeRotation) {
-        globe.rotation.y += 0.003;
-      }
-      renderer.render(scene, camera);
-    }
-    animate();
-
-    // Cleanup
-    return () => {
-      if (animationId) {
-        cancelAnimationFrame(animationId);
-      }
-      if (globeRef.current && renderer.domElement) {
-        globeRef.current.removeChild(renderer.domElement);
-      }
-      renderer.dispose();
-    };
-  }, [globeRotation, globeView]);
-
-  const getStatusColor = (status) => {
-    switch(status) {
-      case 'healthy': return '#10b981';
-      case 'warning': return '#f59e0b';
-      case 'error': return '#ef4444';
-      default: return '#6b7280';
-    }
-  };
-
-  const getStatusLabel = (status) => {
-    switch(status) {
-      case 'healthy': return 'Operational';
-      case 'warning': return 'Warning';
-      case 'error': return 'Critical';
-      default: return 'Unknown';
-    }
-  };
-
-  const FlatMapView = () => (
-    <div className="flat-map-container">
-      <div className="world-map">
-        <svg viewBox="0 0 1000 500" className="map-svg">
-          {/* Simplified world map outline */}
-          <path d="M150,200 L200,180 L300,190 L400,200 L500,210 L600,200 L700,190 L800,200 L850,210" 
-                stroke="#444" strokeWidth="2" fill="none" opacity="0.3"/>
-          <path d="M100,250 L200,240 L300,250 L400,260 L500,250 L600,240 L700,250 L800,260 L900,250" 
-                stroke="#444" strokeWidth="2" fill="none" opacity="0.3"/>
-          <path d="M200,300 L300,290 L400,300 L500,310 L600,300 L700,290 L800,300" 
-                stroke="#444" strokeWidth="2" fill="none" opacity="0.3"/>
-          
-          {/* Deployment points on flat map */}
-          {deploymentData.map(deployment => {
-            // Convert lat/lng to SVG coordinates (simplified projection)
-            const x = ((deployment.lng + 180) / 360) * 1000;
-            const y = ((90 - deployment.lat) / 180) * 500;
-            
-            return (
-              <g key={deployment.id} className="deployment-point">
-                <circle
-                  cx={x}
-                  cy={y}
-                  r="12"
-                  fill={getStatusColor(deployment.status)}
-                  opacity="0.8"
-                  stroke="#fff"
-                  strokeWidth="2"
-                  className="deployment-circle"
-                  onClick={() => setSelectedDeployment(deployment)}
-                />
-                <circle
-                  cx={x}
-                  cy={y}
-                  r="20"
-                  fill={getStatusColor(deployment.status)}
-                  opacity="0.2"
-                  className="deployment-glow"
-                />
-                <text
-                  x={x}
-                  y={y - 25}
-                  textAnchor="middle"
-                  fill="#fff"
-                  fontSize="12"
-                  fontWeight="bold"
-                  className="deployment-label"
-                >
-                  {deployment.name}
-                </text>
-                <text
-                  x={x}
-                  y={y + 35}
-                  textAnchor="middle"
-                  fill="#9ca3af"
-                  fontSize="10"
-                  className="deployment-metric"
-                >
-                  {deployment.latency}ms
-                </text>
-              </g>
-            );
-          })}
-        </svg>
-      </div>
-    </div>
-  );
-
-  return (
-    <div className="page-content">
-      <div className="page-header">
-        <h2>3D Spatial View</h2>
-        <p>Interactive visualization of model deployments worldwide</p>
-      </div>
-
-      {/* Global Status Summary */}
-      <div className="spatial-status-banner">
-        <div className="status-summary">
-          <div className="status-item healthy">
-            <div className="status-dot"></div>
-            <span>4 Healthy</span>
-          </div>
-          <div className="status-item warning">
-            <div className="status-dot"></div>
-            <span>1 Warning</span>
-          </div>
-          <div className="status-item error">
-            <div className="status-dot"></div>
-            <span>1 Critical</span>
-          </div>
-          <div className="status-metric">
-            <span>Global Avg Latency: <strong>58ms</strong></span>
-          </div>
-          <div className="status-metric">
-            <span>Total Throughput: <strong>3.72K req/s</strong></span>
-          </div>
-        </div>
-      </div>
-
-      <div className="spatial-layout">
-        {/* Enhanced Globe/Map Visualization */}
-        <div className="globe-container">
-          <div className="globe-header">
-            <h3>Global Deployment Map</h3>
-            <div className="globe-controls">
-              <button 
-                className={`control-btn ${globeView === '3d' ? 'active' : ''}`}
-                onClick={() => setGlobeView('3d')}
-              >
-                3D Globe
-              </button>
-              <button 
-                className={`control-btn ${globeView === 'flat' ? 'active' : ''}`}
-                onClick={() => setGlobeView('flat')}
-              >
-                Flat Map
-              </button>
-              {globeView === '3d' && (
-                <button 
-                  className={`control-btn ${globeRotation ? 'active' : ''}`}
-                  onClick={() => setGlobeRotation(!globeRotation)}
-                >
-                  {globeRotation ? 'Pause' : 'Rotate'}
-                </button>
-              )}
-            </div>
-          </div>
-          
-          {globeView === '3d' ? (
-            <div ref={globeRef} className="globe-canvas"></div>
-          ) : (
-            <FlatMapView />
-          )}
-          
-          <div className="globe-legend">
-            <div className="legend-item">
-              <div className="legend-dot healthy"></div>
-              <span>Healthy (4)</span>
-            </div>
-            <div className="legend-item">
-              <div className="legend-dot warning"></div>
-              <span>Warning (1)</span>
-            </div>
-            <div className="legend-item">
-              <div className="legend-dot error"></div>
-              <span>Critical (1)</span>
-            </div>
-          </div>
-        </div>
-
-        {/* Deployment Details */}
-        <div className="deployment-details">
-          <h3>Regional Deployments</h3>
-          <div className="deployment-list">
-            {deploymentData.map(deployment => (
-              <div 
-                key={deployment.id} 
-                className={`deployment-card ${selectedDeployment?.id === deployment.id ? 'selected' : ''}`}
-                onClick={() => setSelectedDeployment(deployment)}
-              >
-                <div className="deployment-header">
-                  <div className="deployment-name">
-                    <div 
-                      className="status-indicator-dot" 
-                      style={{ backgroundColor: getStatusColor(deployment.status) }}
-                    ></div>
-                    <span>{deployment.name}</span>
-                  </div>
-                  <span className={`deployment-status ${deployment.status}`}>
-                    {getStatusLabel(deployment.status)}
-                  </span>
-                </div>
-                <div className="deployment-metrics">
-                  <div className="metric">
-                    <span className="metric-label">Latency</span>
-                    <span className="metric-value">{deployment.latency}ms</span>
-                  </div>
-                  <div className="metric">
-                    <span className="metric-label">Throughput</span>
-                    <span className="metric-value">{deployment.throughput} req/s</span>
-                  </div>
-                  <div className="metric">
-                    <span className="metric-label">Model Type</span>
-                    <span className="metric-value">{deployment.modelType}</span>
-                  </div>
-                </div>
-                {selectedDeployment?.id === deployment.id && (
-                  <div className="deployment-actions">
-                    <button className="action-btn primary">Scale Up</button>
-                    <button className="action-btn secondary">View Logs</button>
-                    <button className="action-btn secondary">Restart</button>
-                  </div>
-                )}
-              </div>
-            ))}
-          </div>
-        </div>
-      </div>
-
-      {/* Real-time Metrics */}
-      <div className="spatial-metrics">
-        <div className="metrics-grid">
-          <div className="metric-panel">
-            <h4>Global Load Distribution</h4>
-            <ResponsiveContainer width="100%" height={200}>
-              <BarChart data={deploymentData}>
-                <XAxis dataKey="name" tick={{ fontSize: 10 }} />
-                <YAxis />
-                <Bar dataKey="throughput" fill="#8b5cf6" />
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
-          
-          <div className="metric-panel">
-            <h4>Regional Latency</h4>
-            <ResponsiveContainer width="100%" height={200}>
-              <AreaChart data={deploymentData}>
-                <XAxis dataKey="name" tick={{ fontSize: 10 }} />
-                <YAxis />
-                <Area type="monotone" dataKey="latency" fill="#06b6d4" stroke="#06b6d4" />
-              </AreaChart>
-            </ResponsiveContainer>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-};
-
-// Enhanced Drift Page Component with Feature Analysis
-const DriftPage = () => {
-  const [selectedFeature, setSelectedFeature] = useState('feature_x');
-  const [timeRange, setTimeRange] = useState('7d');
-
-  const featureList = [
-    { id: 'feature_x', name: 'Feature X', type: 'Numerical', drift: 0.89, status: 'critical' },
-    { id: 'feature_y', name: 'Feature Y', type: 'Categorical', drift: 0.23, status: 'good' },
-    { id: 'feature_z', name: 'Feature Z', type: 'Numerical', drift: 0.67, status: 'warning' },
-    { id: 'feature_a', name: 'Feature A', type: 'Text', drift: 0.45, status: 'warning' },
-    { id: 'feature_b', name: 'Feature B', type: 'Numerical', drift: 0.12, status: 'good' },
-    { id: 'feature_c', name: 'Feature C', type: 'Categorical', drift: 0.78, status: 'warning' }
-  ];
-
-  const distributionData = selectedFeature === 'feature_x' ? [
-    { bin: '0-10', training: 120, production: 45, drift: 0.8 },
-    { bin: '10-20', training: 200, production: 180, drift: 0.1 },
-    { bin: '20-30', training: 350, production: 380, drift: 0.08 },
-    { bin: '30-40', training: 280, production: 420, drift: 0.5 },
-    { bin: '40-50', training: 150, production: 220, drift: 0.47 },
-    { bin: '50-60', training: 80, production: 180, drift: 1.25 },
-    { bin: '60-70', training: 45, production: 120, drift: 1.67 },
-    { bin: '70-80', training: 25, production: 95, drift: 2.8 }
-  ] : [
-    { bin: 'A', training: 400, production: 350, drift: 0.12 },
-    { bin: 'B', training: 300, production: 280, drift: 0.07 },
-    { bin: 'C', training: 200, production: 450, drift: 1.25 },
-    { bin: 'D', training: 100, production: 120, drift: 0.2 }
-  ];
-
-  const getFeatureStatusColor = (status) => {
-    switch(status) {
-      case 'critical': return '#ef4444';
-      case 'warning': return '#f59e0b';
-      case 'good': return '#10b981';
-      default: return '#6b7280';
-    }
-  };
-
-  const selectedFeatureData = featureList.find(f => f.id === selectedFeature);
-
-  return (
-    <div className="page-content">
-      <div className="page-header">
-        <h2>Data Drift Analysis</h2>
-        <p>Monitor data distribution changes and feature drift over time</p>
-      </div>
-
-      {/* Drift Alert Banner */}
-      {selectedFeatureData?.status === 'critical' && (
-        <div className="drift-alert-banner">
-          <div className="alert-content">
-            <AlertTriangle size={20} />
-            <div className="alert-text">
-              <strong>Critical Drift Detected:</strong> {selectedFeatureData.name} showing {(selectedFeatureData.drift * 100).toFixed(0)}% drift. 
-              Immediate model retraining recommended.
-            </div>
-            <button className="alert-action">Trigger Retraining</button>
-          </div>
-        </div>
       )}
-
-      {/* Drift Summary Cards */}
-      <div className="drift-summary">
-        <MetricCard 
-          title="Features at Risk" 
-          value={featureList.filter(f => f.status === 'critical').length}
-          unit="" 
-          threshold="0"
-          trend={1}
-          status="critical"
-        />
-        <MetricCard 
-          title="Avg Drift Score" 
-          value={(featureList.reduce((acc, f) => acc + f.drift, 0) / featureList.length).toFixed(2)}
-          unit="" 
-          threshold="0.5"
-          trend={0.8}
-          status="warning"
-        />
-        <MetricCard 
-          title="Days Since Retrain" 
-          value="14" 
-          unit="" 
-          threshold="7"
-          trend={0}
-          status="warning"
-        />
-        <MetricCard 
-          title="Data Points Analyzed" 
-          value="1.2M" 
-          unit="" 
-          trend={0}
-          status="good"
-        />
-      </div>
-
-      <div className="drift-layout">
-        {/* Feature Selection Sidebar */}
-        <div className="features-panel">
-          <div className="panel-header">
-            <h3>Features</h3>
-            <div className="time-selector">
-              <select 
-                value={timeRange} 
-                onChange={(e) => setTimeRange(e.target.value)}
-                className="time-select"
-              >
-                <option value="1d">Last 24h</option>
-                <option value="7d">Last 7 days</option>
-                <option value="30d">Last 30 days</option>
-              </select>
-            </div>
-          </div>
-          
-          <div className="features-list">
-            {featureList.map(feature => (
-              <div 
-                key={feature.id}
-                className={`feature-item ${selectedFeature === feature.id ? 'selected' : ''}`}
-                onClick={() => setSelectedFeature(feature.id)}
-              >
-                <div className="feature-header">
-                  <div className="feature-info">
-                    <span className="feature-name">{feature.name}</span>
-                    <span className="feature-type">{feature.type}</span>
-                  </div>
-                  <div 
-                    className="feature-status-dot"
-                    style={{ backgroundColor: getFeatureStatusColor(feature.status) }}
-                  ></div>
-                </div>
-                <div className="feature-drift">
-                  <span className="drift-label">Drift Score</span>
-                  <span 
-                    className="drift-value"
-                    style={{ color: getFeatureStatusColor(feature.status) }}
-                  >
-                    {feature.drift.toFixed(2)}
-                  </span>
-                </div>
-                <div className="drift-bar">
-                  <div 
-                    className="drift-progress"
-                    style={{ 
-                      width: `${Math.min(feature.drift * 100, 100)}%`,
-                      backgroundColor: getFeatureStatusColor(feature.status)
-                    }}
-                  ></div>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        {/* Main Analysis Panel */}
-        <div className="analysis-panel">
-          <div className="analysis-header">
-            <h3>{selectedFeatureData?.name} Analysis</h3>
-            <div className="analysis-actions">
-              <button className="action-btn">Export Report</button>
-              <button className="action-btn primary">Schedule Retrain</button>
-            </div>
-          </div>
-
-          {/* Distribution Comparison */}
-          <div className="chart-container large">
-            <div className="chart-header">
-              <h4>Distribution Comparison: Training vs Production</h4>
-              <div className="chart-legend">
-                <div className="legend-item">
-                  <div className="legend-color" style={{ backgroundColor: '#8b5cf6' }}></div>
-                  <span>Training Data</span>
-                </div>
-                <div className="legend-item">
-                  <div className="legend-color" style={{ backgroundColor: '#06b6d4' }}></div>
-                  <span>Production Data</span>
-                </div>
-              </div>
-            </div>
-            <ResponsiveContainer width="100%" height={300}>
-              <BarChart data={distributionData}>
-                <XAxis dataKey="bin" />
-                <YAxis />
-                <Bar dataKey="training" fill="#8b5cf6" name="Training" />
-                <Bar dataKey="production" fill="#06b6d4" name="Production" />
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
-
-          {/* Statistical Summary */}
-          <div className="stats-grid">
-            <div className="stat-card">
-              <h5>KL Divergence</h5>
-              <div className="stat-value critical">0.89</div>
-              <div className="stat-description">Very High Drift</div>
-            </div>
-            <div className="stat-card">
-              <h5>Population Stability Index</h5>
-              <div className="stat-value warning">0.67</div>
-              <div className="stat-description">Significant Change</div>
-            </div>
-            <div className="stat-card">
-              <h5>Jensen-Shannon Distance</h5>
-              <div className="stat-value critical">0.72</div>
-              <div className="stat-description">High Divergence</div>
-            </div>
-            <div className="stat-card">
-              <h5>Wasserstein Distance</h5>
-              <div className="stat-value warning">1.34</div>
-              <div className="stat-description">Elevated</div>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* Recommendations */}
-      <div className="drift-recommendations">
-        <h2>Drift Mitigation Recommendations</h2>
-        <div className="recommendations-grid">
-          <div className="recommendation-card urgent">
-            <div className="recommendation-icon">
-              <AlertTriangle size={20} />
-            </div>
-            <div className="recommendation-content">
-              <h4>Immediate Retraining Required</h4>
-              <p>Feature X shows critical drift (89%). Model performance likely degraded. Start retraining with last 30 days of data.</p>
-              <button className="recommendation-action">Start Retraining</button>
-            </div>
-          </div>
-          
-          <div className="recommendation-card warning">
-            <div className="recommendation-icon">
-              <Eye size={20} />
-            </div>
-            <div className="recommendation-content">
-              <h4>Enhanced Monitoring</h4>
-              <p>Set up automated alerts for Feature Z and Feature A. Consider reducing drift detection threshold.</p>
-              <button className="recommendation-action">Configure Alerts</button>
-            </div>
-          </div>
-          
-          <div className="recommendation-card info">
-            <div className="recommendation-icon">
-              <Shield size={20} />
-            </div>
-            <div className="recommendation-content">
-              <h4>Data Quality Check</h4>
-              <p>Investigate data source changes in the last 3 days. Validate feature engineering pipeline.</p>
-              <button className="recommendation-action">Run Validation</button>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
+    </Panel>
   );
 };
 
-// Enhanced Logs Page Component with Advanced Filtering and Real-time Monitoring
-const LogsPage = () => {
-  const [selectedLevel, setSelectedLevel] = useState('all');
-  const [selectedSource, setSelectedSource] = useState('all');
-  const [searchQuery, setSearchQuery] = useState('');
-  const [autoRefresh, setAutoRefresh] = useState(true);
-  const [selectedLog, setSelectedLog] = useState(null);
-  const [timeRange, setTimeRange] = useState('1h');
-
-  const logSources = ['all', 'model_server', 'inference_engine', 'data_pipeline', 'monitoring', 'auth_service', 'load_balancer'];
-  const logLevels = ['all', 'error', 'warning', 'info', 'debug'];
-
-  const logEntries = [
-    {
-      id: 1,
-      timestamp: '2024-12-19 14:32:15.234',
-      level: 'error',
-      source: 'model_server',
-      message: 'Model inference failed for request_id: req_789abc - GPU memory exhausted',
-      details: {
-        request_id: 'req_789abc',
-        model_version: 'v2.1.3',
-        gpu_memory: '11.2GB/12GB',
-        error_code: 'CUDA_OUT_OF_MEMORY',
-        stack_trace: 'RuntimeError: CUDA out of memory. Tried to allocate 2.00 GiB...',
-        user_id: 'user_12345'
-      },
-      tags: ['gpu', 'memory', 'inference']
-    },
-    {
-      id: 2,
-      timestamp: '2024-12-19 14:31:58.127',
-      level: 'warning',
-      source: 'data_pipeline',
-      message: 'Data quality check failed - 15% missing values detected in feature_x',
-      details: {
-        batch_id: 'batch_456def',
-        missing_percentage: 15.3,
-        affected_features: ['feature_x', 'feature_y'],
-        record_count: 10000,
-        data_source: 'prod_database'
-      },
-      tags: ['data_quality', 'features', 'validation']
-    },
-    {
-      id: 3,
-      timestamp: '2024-12-19 14:31:42.891',
-      level: 'info',
-      source: 'inference_engine',
-      message: 'Successful batch prediction completed for 5000 samples',
-      details: {
-        batch_id: 'batch_123ghi',
-        sample_count: 5000,
-        avg_latency: '45ms',
-        accuracy_score: 0.94,
-        model_version: 'v2.1.3'
-      },
-      tags: ['batch', 'prediction', 'success']
-    }
-  ];
-
-  const filteredLogs = logEntries.filter(log => {
-    const matchesLevel = selectedLevel === 'all' || log.level === selectedLevel;
-    const matchesSource = selectedSource === 'all' || log.source === selectedSource;
-    const matchesSearch = searchQuery === '' || 
-      log.message.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      log.tags.some(tag => tag.toLowerCase().includes(searchQuery.toLowerCase()));
-    
-    return matchesLevel && matchesSource && matchesSearch;
+const SettingsPage = ({ onToast }) => {
+  const [tab, setTab] = useState('display');
+  const [display, setDisplay] = useState({
+    theme: 'dark',
+    timezone: 'UTC',
+    density: 'comfortable',
+    precision: '3',
+    reduceMotion: false,
+  });
+  const [routing, setRouting] = useState({
+    critical: { email: true, slack: true, pagerduty: true },
+    warning:  { email: false, slack: true, pagerduty: false },
+    info:     { email: false, slack: true, pagerduty: false },
+  });
+  const [channels, setChannels] = useState({
+    slack: '#training-alerts',
+    slackInfo: '#training-info',
+    pagerduty: 'training-oncall',
+    email: 'research-team@anthropic.com',
   });
 
-  const getLevelColor = (level) => {
-    switch(level) {
-      case 'error': return '#ef4444';
-      case 'warning': return '#f59e0b';
-      case 'info': return '#3b82f6';
-      case 'debug': return '#9ca3af';
-      default: return '#6b7280';
-    }
-  };
+  const tabs = [
+    { id: 'display', label: 'Display', icon: Eye },
+    { id: 'notifications', label: 'Notifications', icon: Bell },
+    { id: 'integrations', label: 'Integrations', icon: Hash },
+    { id: 'api', label: 'API access', icon: Key },
+  ];
 
-  const getLevelIcon = (level) => {
-    switch(level) {
-      case 'error': return <XCircle size={16} />;
-      case 'warning': return <AlertTriangle size={16} />;
-      case 'info': return <CheckCircle size={16} />;
-      case 'debug': return <Activity size={16} />;
-      default: return <AlertCircle size={16} />;
-    }
-  };
-
-  const logLevelCounts = {
-    error: logEntries.filter(log => log.level === 'error').length,
-    warning: logEntries.filter(log => log.level === 'warning').length,
-    info: logEntries.filter(log => log.level === 'info').length,
-    debug: logEntries.filter(log => log.level === 'debug').length
-  };
+  const meta = <span className="mp-meta-chip"><Globe2 size={10} />UTC</span>;
 
   return (
-    <div className="page-content">
-      <div className="page-header">
-        <h2>System Logs</h2>
-        <p>Real-time system logs with advanced filtering and debugging tools</p>
-      </div>
-
-      {/* Log Summary Cards */}
-      <div className="logs-summary">
-        <div className="summary-card error">
-          <div className="summary-icon">
-            <XCircle size={20} />
-          </div>
-          <div className="summary-content">
-            <h4>{logLevelCounts.error}</h4>
-            <p>Errors (Last Hour)</p>
-          </div>
+    <>
+      <PageHeader
+        title="Settings"
+        subtitle="Account, workspace, and preferences"
+        meta={meta}
+      />
+      <div className="mp-settings-shell">
+        <div className="mp-settings-nav">
+          {tabs.map(t => {
+            const Icon = t.icon;
+            return (
+              <button
+                key={t.id}
+                className={`mp-settings-nav-item ${tab === t.id ? 'active' : ''}`}
+                onClick={() => setTab(t.id)}
+              >
+                <Icon size={14} className="mp-nav-icon" />
+                {t.label}
+              </button>
+            );
+          })}
         </div>
-        <div className="summary-card warning">
-          <div className="summary-icon">
-            <AlertTriangle size={20} />
-          </div>
-          <div className="summary-content">
-            <h4>{logLevelCounts.warning}</h4>
-            <p>Warnings (Last Hour)</p>
-          </div>
-        </div>
-        <div className="summary-card info">
-          <div className="summary-icon">
-            <CheckCircle size={20} />
-          </div>
-          <div className="summary-content">
-            <h4>{logLevelCounts.info}</h4>
-            <p>Info Messages</p>
-          </div>
-        </div>
-        <div className="summary-card success">
-          <div className="summary-icon">
-            <Activity size={20} />
-          </div>
-          <div className="summary-content">
-            <h4>Live</h4>
-            <p>Auto-refresh {autoRefresh ? 'ON' : 'OFF'}</p>
-          </div>
-        </div>
-      </div>
-
-      {/* Controls and Filters */}
-      <div className="logs-controls">
-        <div className="controls-left">
-          <div className="search-container">
-            <input
-              type="text"
-              placeholder="Search logs, tags, or error codes..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="search-input"
+        <div className="mp-settings-section">
+          {tab === 'display' && <DisplaySection display={display} setDisplay={setDisplay} />}
+          {tab === 'notifications' && (
+            <NotificationsSection
+              routing={routing}
+              setRouting={setRouting}
+              channels={channels}
+              setChannels={setChannels}
             />
-          </div>
-          
-          <select 
-            value={selectedLevel} 
-            onChange={(e) => setSelectedLevel(e.target.value)}
-            className="filter-select"
-          >
-            {logLevels.map(level => (
-              <option key={level} value={level}>
-                {level === 'all' ? 'All Levels' : level.charAt(0).toUpperCase() + level.slice(1)}
-              </option>
-            ))}
-          </select>
-
-          <select 
-            value={selectedSource} 
-            onChange={(e) => setSelectedSource(e.target.value)}
-            className="filter-select"
-          >
-            {logSources.map(source => (
-              <option key={source} value={source}>
-                {source === 'all' ? 'All Sources' : source.replace('_', ' ').toUpperCase()}
-              </option>
-            ))}
-          </select>
+          )}
+          {tab === 'integrations' && <IntegrationsSection onToast={onToast} />}
+          {tab === 'api' && <ApiSection onToast={onToast} />}
         </div>
+      </div>
+    </>
+  );
+};
 
-        <div className="controls-right">
-          <button 
-            className={`auto-refresh-btn ${autoRefresh ? 'active' : ''}`}
-            onClick={() => setAutoRefresh(!autoRefresh)}
+/* ═══════════════════════════════════════════════════════════════
+   WORKSPACE SWITCHER
+   ─────────────────────────────────────────────────────────────── */
+
+const WorkspaceSwitcher = ({ current, onChange, onCreate, onSettings }) => {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e) => {
+      if (ref.current && !ref.current.contains(e.target)) {
+        setOpen(false);
+      }
+    };
+    const escHandler = (e) => {
+      if (e.key === 'Escape') setOpen(false);
+    };
+    document.addEventListener('mousedown', handler);
+    document.addEventListener('keydown', escHandler);
+    return () => {
+      document.removeEventListener('mousedown', handler);
+      document.removeEventListener('keydown', escHandler);
+    };
+  }, [open]);
+
+  return (
+    <div className="mp-ws-host" ref={ref}>
+      <button
+        className="mp-workspace"
+        type="button"
+        onClick={() => setOpen(!open)}
+        aria-expanded={open}
+        aria-haspopup="menu"
+      >
+        <div className="mp-workspace-avatar" style={{ background: current.gradient }}>
+          {current.avatar}
+        </div>
+        <div className="mp-workspace-text">
+          <span className="mp-workspace-name">{current.name}</span>
+          <span className="mp-workspace-team">{current.team}</span>
+        </div>
+        <ChevronDown
+          size={12}
+          color="var(--text-tertiary)"
+          style={{ transform: open ? 'rotate(180deg)' : 'none', transition: 'transform 160ms var(--ease-out)' }}
+        />
+      </button>
+      {open && (
+        <div className="mp-ws-popover" role="menu">
+          <div className="mp-ws-popover-label">Switch workspace</div>
+          {workspaces.map(ws => (
+            <button
+              key={ws.id}
+              className="mp-ws-item"
+              onClick={() => {
+                onChange(ws);
+                setOpen(false);
+              }}
+              role="menuitem"
+            >
+              <div className="mp-ws-item-avatar" style={{ background: ws.gradient }}>
+                {ws.avatar}
+              </div>
+              <div className="mp-ws-item-text">
+                <div className="mp-ws-item-name">{ws.name}</div>
+                <div className="mp-ws-item-team">{ws.team}</div>
+              </div>
+              <span className="mp-ws-item-runs">
+                {ws.activeRuns} {ws.activeRuns === 1 ? 'run' : 'runs'}
+              </span>
+              {ws.id === current.id && <Check size={14} className="mp-ws-item-check" />}
+            </button>
+          ))}
+          <div className="mp-ws-divider" />
+          <button
+            className="mp-ws-item muted"
+            onClick={() => { setOpen(false); onCreate(); }}
+            role="menuitem"
           >
-            <Activity size={16} />
-            Auto-refresh
+            <div className="mp-ws-item-avatar" style={{ background: 'var(--surface-active)', color: 'var(--text-secondary)' }}>
+              <Plus size={14} />
+            </div>
+            <div className="mp-ws-item-text">
+              <div className="mp-ws-item-name">New workspace</div>
+            </div>
+          </button>
+          <button
+            className="mp-ws-item muted"
+            onClick={() => { setOpen(false); onSettings(); }}
+            role="menuitem"
+          >
+            <div className="mp-ws-item-avatar" style={{ background: 'var(--surface-active)', color: 'var(--text-secondary)' }}>
+              <Settings size={14} />
+            </div>
+            <div className="mp-ws-item-text">
+              <div className="mp-ws-item-name">Workspace settings</div>
+            </div>
           </button>
         </div>
-      </div>
-
-      <div className="logs-layout">
-        {/* Main Logs List */}
-        <div className="logs-list">
-          <div className="logs-header">
-            <h3>System Logs ({filteredLogs.length} entries)</h3>
-          </div>
-
-          <div className="logs-container">
-            {filteredLogs.map(log => (
-              <div 
-                key={log.id} 
-                className={`log-entry ${log.level} ${selectedLog?.id === log.id ? 'selected' : ''}`}
-                onClick={() => setSelectedLog(log)}
-              >
-                <div className="log-main">
-                  <div className="log-header">
-                    <div className="log-level" style={{ color: getLevelColor(log.level) }}>
-                      {getLevelIcon(log.level)}
-                      <span>{log.level.toUpperCase()}</span>
-                    </div>
-                    <div className="log-timestamp">{log.timestamp}</div>
-                  </div>
-                  
-                  <div className="log-message">{log.message}</div>
-                  
-                  <div className="log-meta">
-                    <div className="log-source">{log.source}</div>
-                    <div className="log-tags">
-                      {log.tags.map(tag => (
-                        <span key={tag} className="log-tag">#{tag}</span>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-
-                {selectedLog?.id === log.id && (
-                  <div className="log-details">
-                    <h4>Log Details</h4>
-                    <div className="details-grid">
-                      {Object.entries(log.details).map(([key, value]) => (
-                        <div key={key} className="detail-item">
-                          <span className="detail-key">{key.replace('_', ' ')}:</span>
-                          <span className="detail-value">{typeof value === 'object' ? JSON.stringify(value) : value}</span>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-              </div>
-            ))}
-          </div>
-        </div>
-
-        {/* Log Analytics Sidebar */}
-        <div className="logs-sidebar">
-          <div className="sidebar-section">
-            <h4>Log Distribution</h4>
-            <div className="log-chart">
-              <ResponsiveContainer width="100%" height={200}>
-                <BarChart data={[
-                  { level: 'Error', count: logLevelCounts.error, color: '#ef4444' },
-                  { level: 'Warning', count: logLevelCounts.warning, color: '#f59e0b' },
-                  { level: 'Info', count: logLevelCounts.info, color: '#3b82f6' }
-                ]}>
-                  <XAxis dataKey="level" tick={{ fontSize: 10 }} />
-                  <YAxis tick={{ fontSize: 10 }} />
-                  <Bar dataKey="count" fill="#8b5cf6" />
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-          </div>
-        </div>
-      </div>
+      )}
     </div>
   );
 };
 
-// Main App Component
-const ModelPulse = () => {
-  const [currentPage, setCurrentPage] = useState('overview');
+/* ═══════════════════════════════════════════════════════════════
+   APP SHELL
+   ─────────────────────────────────────────────────────────────── */
 
-  const menuItems = [
+const ModelPulse = () => {
+  const [page, setPage] = useState('training');
+  const [toast, setToast] = useState(null);
+  const [currentWorkspace, setCurrentWorkspace] = useState(workspaces[0]);
+
+  const showToast = (msg) => {
+    setToast(msg);
+    setTimeout(() => setToast(null), 2400);
+  };
+
+  const handleWorkspaceChange = (ws) => {
+    if (ws.id === currentWorkspace.id) return;
+    setCurrentWorkspace(ws);
+    showToast(`Switched to ${ws.name}`);
+  };
+
+  const navItems = [
     { id: 'overview', label: 'Overview', icon: BarChart3 },
-    { id: 'alerts', label: 'Alerts', icon: AlertTriangle },
+    { id: 'runs', label: 'Runs', icon: ListOrdered },
     { id: 'training', label: 'Training', icon: TrendingUp },
-    { id: 'spatial', label: 'Spatial', icon: Globe },
-    { id: 'drift', label: 'Drift', icon: Activity },
-    { id: 'logs', label: 'Logs', icon: FileText }
+    { id: 'alerts', label: 'Alerts', icon: AlertTriangle, badge: 2 },
+    { id: 'data', label: 'Data integrity', icon: ShieldCheck },
+    { id: 'logs', label: 'Logs', icon: FileText },
   ];
 
   const renderPage = () => {
-    switch(currentPage) {
-      case 'overview': return <OverviewPage />;
-      case 'alerts': return <AlertsPage />;
-      case 'training': return <TrainingPage />;
-      case 'spatial': return <SpatialPage />;
-      case 'drift': return <DriftPage />;
+    switch (page) {
+      case 'overview': return <OverviewPage onToast={showToast} />;
+      case 'runs': return <RunsPage />;
+      case 'training': return <TrainingPage onToast={showToast} />;
+      case 'alerts': return <AlertsPage onToast={showToast} />;
+      case 'data': return <DataIntegrityPage />;
       case 'logs': return <LogsPage />;
-      default: return <OverviewPage />;
+      case 'settings': return <SettingsPage onToast={showToast} />;
+      default: return <TrainingPage onToast={showToast} />;
     }
   };
 
   return (
-    <div className="app-container">
-      {/* Sidebar */}
-      <div className="sidebar">
-        <div className="logo-section">
-          <div className="logo">
-            <div className="logo-icon"></div>
-            <h1>ModelPulse</h1>
-          </div>
-        </div>
-
-        <nav className="nav">
-          {menuItems.map(item => {
-            const IconComponent = item.icon;
-            return (
-              <div 
-                key={item.id}
-                className={`nav-item ${currentPage === item.id ? 'active' : ''}`}
-                onClick={() => setCurrentPage(item.id)}
-              >
-                <IconComponent size={20} />
-                <span>{item.label}</span>
+    <>
+      <style>{designTokens}</style>
+      <div className="mp-root">
+        <div className="mp-app">
+          <aside className="mp-sidebar">
+            <div className="mp-brand">
+              <div className="mp-brand-name">
+                ModelPulse<span className="mp-brand-dot" />
               </div>
-            );
-          })}
-        </nav>
+              <div className="mp-brand-meta">v 0.1 · internal</div>
+            </div>
 
-        <div className="interface-placeholder">
-          <div className="placeholder-text">Live Model Metrics</div>
-          <div className="metric-mini-grid">
-            <div className="mini-metric">
-              <span className="mini-label">Uptime</span>
-              <span className="mini-value">99.8%</span>
+            <WorkspaceSwitcher
+              current={currentWorkspace}
+              onChange={handleWorkspaceChange}
+              onCreate={() => showToast('New workspace flow')}
+              onSettings={() => setPage('settings')}
+            />
+
+            <div className="mp-nav-section-label">Observability</div>
+            <nav className="mp-nav">
+              {navItems.map(item => {
+                const Icon = item.icon;
+                return (
+                  <button
+                    key={item.id}
+                    className={`mp-nav-item ${page === item.id ? 'active' : ''}`}
+                    onClick={() => setPage(item.id)}
+                  >
+                    <Icon size={14} className="mp-nav-icon" />
+                    {item.label}
+                    {item.badge && <span className="mp-nav-badge">{item.badge}</span>}
+                  </button>
+                );
+              })}
+            </nav>
+
+            <div className="mp-sidebar-footer">
+              <button
+                className={`mp-nav-item ${page === 'settings' ? 'active' : ''}`}
+                type="button"
+                onClick={() => setPage('settings')}
+              >
+                <Settings size={14} className="mp-nav-icon" />
+                Settings
+              </button>
+              <button className="mp-sidebar-user" type="button">
+                <div className="mp-sidebar-user-avatar">YO</div>
+                <div className="mp-sidebar-user-text">
+                  <div className="mp-sidebar-user-name">you</div>
+                  <div className="mp-sidebar-user-role">{currentWorkspace.role}</div>
+                </div>
+                <MoreHorizontal size={14} color="var(--text-tertiary)" />
+              </button>
             </div>
-            <div className="mini-metric">
-              <span className="mini-label">Requests/s</span>
-              <span className="mini-value">1.2K</span>
-            </div>
-            <div className="mini-metric">
-              <span className="mini-label">Avg Latency</span>
-              <span className="mini-value">45ms</span>
-            </div>
-            <div className="mini-metric">
-              <span className="mini-label">Error Rate</span>
-              <span className="mini-value">0.02%</span>
-            </div>
-          </div>
-          <div className="placeholder-bars">
-            <div className="bar-row">
-              <div className="bar long"></div>
-              <div className="bar long light"></div>
-            </div>
-            <div className="bar-row">
-              <div className="bar short"></div>
-              <div className="bar short light"></div>
-            </div>
-          </div>
+          </aside>
+          <main className="mp-main">
+            {renderPage()}
+          </main>
         </div>
+
+        {toast && (
+          <div className="mp-toast">
+            <CheckCircle2 size={16} className="mp-toast-icon" />
+            <span>{toast}</span>
+          </div>
+        )}
       </div>
-
-      {/* Main Content */}
-      <div className="main-content">
-        {renderPage()}
-      </div>
-
-      <style>{`
-        .app-container {
-          display: flex;
-          height: 100vh;
-          background: #0f0f0f;
-          font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-          color: #ffffff;
-        }
-
-        .critical-alert-banner {
-          background: linear-gradient(90deg, #ef4444, #dc2626);
-          border-radius: 12px;
-          margin-bottom: 24px;
-          padding: 16px;
-          animation: pulse 2s infinite;
-        }
-
-        @keyframes pulse {
-          0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.4); }
-          50% { box-shadow: 0 0 0 10px rgba(239, 68, 68, 0); }
-          100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
-        }
-
-        .alert-banner-content {
-          display: flex;
-          align-items: center;
-          gap: 16px;
-        }
-
-        .alert-banner-icon {
-          color: #ffffff;
-        }
-
-        .alert-banner-text {
-          flex: 1;
-          color: #ffffff;
-          font-weight: 500;
-        }
-
-        .alert-banner-action {
-          background: rgba(255, 255, 255, 0.2);
-          border: 1px solid rgba(255, 255, 255, 0.3);
-          border-radius: 8px;
-          padding: 8px 16px;
-          color: #ffffff;
-          cursor: pointer;
-          display: flex;
-          align-items: center;
-          gap: 8px;
-          font-size: 14px;
-          transition: all 0.2s ease;
-        }
-
-        .alert-banner-actions {
-          display: flex;
-          gap: 8px;
-        }
-
-        .alert-banner-action.secondary {
-          background: rgba(255, 255, 255, 0.1);
-          border: 1px solid rgba(255, 255, 255, 0.2);
-        }
-
-        .modal-overlay {
-          position: fixed;
-          top: 0;
-          left: 0;
-          right: 0;
-          bottom: 0;
-          background: rgba(0, 0, 0, 0.8);
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          z-index: 1000;
-          backdrop-filter: blur(4px);
-        }
-
-        .modal-content {
-          background: linear-gradient(180deg, #1a1a1a 0%, #161616 100%);
-          border: 1px solid #2a2a2a;
-          border-radius: 16px;
-          padding: 32px;
-          max-width: 500px;
-          width: 90%;
-          max-height: 80vh;
-          overflow-y: auto;
-        }
-
-        .modal-content h3 {
-          font-size: 20px;
-          font-weight: 600;
-          margin: 0 0 16px 0;
-          color: #ffffff;
-        }
-
-        .modal-content p {
-          color: #9ca3af;
-          margin: 0 0 24px 0;
-          line-height: 1.5;
-        }
-
-        .modal-actions {
-          display: flex;
-          gap: 12px;
-          justify-content: flex-end;
-        }
-
-        .modal-actions button {
-          background: rgba(255, 255, 255, 0.05);
-          border: 1px solid #2a2a2a;
-          border-radius: 8px;
-          padding: 10px 20px;
-          color: #9ca3af;
-          cursor: pointer;
-          transition: all 0.2s ease;
-        }
-
-        .modal-actions button.primary {
-          background: linear-gradient(135deg, #8b5cf6 0%, #a855f7 100%);
-          border-color: #8b5cf6;
-          color: #ffffff;
-        }
-
-        .investigation-details {
-          background: rgba(139, 92, 246, 0.05);
-          border: 1px solid rgba(139, 92, 246, 0.2);
-          border-radius: 8px;
-          padding: 16px;
-          margin: 16px 0;
-        }
-
-        .alert-timeline {
-          background: rgba(255, 255, 255, 0.02);
-          border-radius: 8px;
-          padding: 16px;
-          margin: 16px 0;
-        }
-
-        .timeline-item {
-          display: flex;
-          gap: 16px;
-          align-items: center;
-          padding: 8px 0;
-          border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-        }
-
-        .timeline-item:last-child {
-          border-bottom: none;
-        }
-
-        .sidebar {
-          width: 280px;
-          background: linear-gradient(180deg, #1a1a1a 0%, #161616 100%);
-          border-right: 1px solid #2a2a2a;
-          display: flex;
-          flex-direction: column;
-          padding: 24px;
-          gap: 32px;
-        }
-
-        .logo-section {
-          border-bottom: 1px solid #2a2a2a;
-          padding-bottom: 24px;
-        }
-
-        .logo {
-          display: flex;
-          align-items: center;
-          gap: 12px;
-        }
-
-        .logo-icon {
-          width: 32px;
-          height: 32px;
-          background: linear-gradient(135deg, #8b5cf6 0%, #a855f7 100%);
-          border-radius: 8px;
-        }
-
-        .logo h1 {
-          font-size: 24px;
-          font-weight: 700;
-          margin: 0;
-          background: linear-gradient(135deg, #8b5cf6 0%, #a855f7 100%);
-          -webkit-background-clip: text;
-          -webkit-text-fill-color: transparent;
-          background-clip: text;
-        }
-
-        .nav {
-          display: flex;
-          flex-direction: column;
-          gap: 8px;
-        }
-
-        .nav-item {
-          display: flex;
-          align-items: center;
-          gap: 12px;
-          padding: 12px 16px;
-          border-radius: 8px;
-          cursor: pointer;
-          transition: all 0.2s ease;
-          color: #9ca3af;
-        }
-
-        .nav-item:hover {
-          background: rgba(139, 92, 246, 0.1);
-          color: #ffffff;
-        }
-
-        .nav-item.active {
-          background: linear-gradient(135deg, #8b5cf6 0%, #a855f7 100%);
-          color: #ffffff;
-        }
-
-        .interface-placeholder {
-          flex: 1;
-          display: flex;
-          flex-direction: column;
-          gap: 16px;
-          padding: 20px;
-          background: rgba(139, 92, 246, 0.05);
-          border-radius: 12px;
-          border: 1px solid rgba(139, 92, 246, 0.2);
-        }
-
-        .placeholder-text {
-          font-size: 14px;
-          color: #8b5cf6;
-          text-align: center;
-          font-weight: 600;
-        }
-
-        .metric-mini-grid {
-          display: grid;
-          grid-template-columns: 1fr 1fr;
-          gap: 12px;
-        }
-
-        .mini-metric {
-          display: flex;
-          flex-direction: column;
-          align-items: center;
-          padding: 8px;
-          background: rgba(139, 92, 246, 0.1);
-          border-radius: 6px;
-          border: 1px solid rgba(139, 92, 246, 0.2);
-        }
-
-        .mini-label {
-          font-size: 10px;
-          color: #9ca3af;
-          margin-bottom: 4px;
-        }
-
-        .mini-value {
-          font-size: 14px;
-          font-weight: 700;
-          color: #8b5cf6;
-        }
-
-        .placeholder-bars {
-          display: flex;
-          flex-direction: column;
-          gap: 8px;
-        }
-
-        .bar-row {
-          display: flex;
-          gap: 8px;
-        }
-
-        .bar {
-          height: 4px;
-          background: linear-gradient(90deg, #8b5cf6 0%, #a855f7 100%);
-          border-radius: 2px;
-        }
-
-        .bar.long {
-          flex: 2;
-        }
-
-        .bar.short {
-          flex: 1;
-        }
-
-        .bar.light {
-          opacity: 0.3;
-        }
-
-        .main-content {
-          flex: 1;
-          padding: 32px;
-          overflow-y: auto;
-        }
-
-        .page-content {
-          max-width: 1400px;
-          margin: 0 auto;
-        }
-
-        .page-header {
-          margin-bottom: 32px;
-        }
-
-        .page-header h2 {
-          font-size: 32px;
-          font-weight: 700;
-          margin: 0 0 8px 0;
-          background: linear-gradient(135deg, #ffffff 0%, #9ca3af 100%);
-          -webkit-background-clip: text;
-          -webkit-text-fill-color: transparent;
-          background-clip: text;
-        }
-
-        .page-header p {
-          color: #9ca3af;
-          margin: 0;
-          font-size: 16px;
-        }
-
-        .metrics-summary {
-          display: grid;
-          grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-          gap: 20px;
-          margin-bottom: 32px;
-        }
-
-        .metric-card {
-          background: linear-gradient(180deg, #1a1a1a 0%, #161616 100%);
-          border: 1px solid #2a2a2a;
-          border-radius: 16px;
-          padding: 24px;
-          position: relative;
-          overflow: hidden;
-        }
-
-        .metric-card.critical {
-          border-left: 4px solid #ef4444;
-        }
-
-        .metric-card.warning {
-          border-left: 4px solid #f59e0b;
-        }
-
-        .metric-card.good {
-          border-left: 4px solid #10b981;
-        }
-
-        .metric-header {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          margin-bottom: 12px;
-        }
-
-        .metric-header h4 {
-          font-size: 14px;
-          font-weight: 500;
-          margin: 0;
-          color: #9ca3af;
-        }
-
-        .trend-up {
-          color: #10b981;
-        }
-
-        .trend-down {
-          color: #ef4444;
-        }
-
-        .metric-value {
-          font-size: 28px;
-          font-weight: 700;
-          margin: 8px 0;
-        }
-
-        .metric-threshold {
-          font-size: 12px;
-          color: #6b7280;
-        }
-
-        .charts-grid {
-          display: grid;
-          grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-          gap: 24px;
-          margin-bottom: 32px;
-        }
-
-        .chart-container {
-          background: linear-gradient(180deg, #1a1a1a 0%, #161616 100%);
-          border: 1px solid #2a2a2a;
-          border-radius: 16px;
-          padding: 24px;
-          height: 300px;
-          display: flex;
-          flex-direction: column;
-        }
-
-        .chart-header {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          margin-bottom: 16px;
-        }
-
-        .chart-header h3 {
-          font-size: 14px;
-          font-weight: 600;
-          margin: 0;
-          color: #9ca3af;
-          letter-spacing: 0.5px;
-        }
-
-        .chart-actions {
-          display: flex;
-          gap: 8px;
-        }
-
-        .status-indicator {
-          padding: 4px 12px;
-          border-radius: 6px;
-          font-size: 11px;
-          font-weight: 500;
-        }
-
-        .status-indicator.critical {
-          background: rgba(239, 68, 68, 0.2);
-          color: #ef4444;
-        }
-
-        .status-indicator.warning {
-          background: rgba(245, 158, 11, 0.2);
-          color: #f59e0b;
-        }
-
-        .status-indicator.good {
-          background: rgba(16, 185, 129, 0.2);
-          color: #10b981;
-        }
-
-        .chart-insight {
-          display: flex;
-          align-items: center;
-          gap: 8px;
-          margin-top: 12px;
-          padding: 8px 12px;
-          background: rgba(139, 92, 246, 0.1);
-          border-radius: 8px;
-          font-size: 12px;
-          color: #9ca3af;
-        }
-
-        .recommendations-section {
-          margin-top: 32px;
-        }
-
-        .recommendations-section h3 {
-          font-size: 20px;
-          font-weight: 600;
-          margin: 0 0 16px 0;
-          color: #ffffff;
-        }
-
-        .recommendations-grid {
-          display: grid;
-          grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-          gap: 16px;
-        }
-
-        .recommendation-card {
-          background: linear-gradient(180deg, #1a1a1a 0%, #161616 100%);
-          border: 1px solid #2a2a2a;
-          border-radius: 12px;
-          padding: 20px;
-          display: flex;
-          gap: 16px;
-          align-items: flex-start;
-        }
-
-        .recommendation-card.urgent {
-          border-left: 4px solid #ef4444;
-        }
-
-        .recommendation-card.warning {
-          border-left: 4px solid #f59e0b;
-        }
-
-        .recommendation-card.info {
-          border-left: 4px solid #3b82f6;
-        }
-
-        .recommendation-icon {
-          flex-shrink: 0;
-          padding: 8px;
-          border-radius: 8px;
-          background: rgba(139, 92, 246, 0.1);
-          color: #8b5cf6;
-        }
-
-        .recommendation-content {
-          flex: 1;
-        }
-
-        .recommendation-content h4 {
-          font-size: 16px;
-          font-weight: 600;
-          margin: 0 0 8px 0;
-          color: #ffffff;
-        }
-
-        .recommendation-content p {
-          font-size: 14px;
-          color: #9ca3af;
-          margin: 0 0 12px 0;
-        }
-
-        .recommendation-action {
-          background: linear-gradient(135deg, #8b5cf6 0%, #a855f7 100%);
-          border: none;
-          border-radius: 6px;
-          padding: 8px 16px;
-          color: #ffffff;
-          font-size: 12px;
-          font-weight: 500;
-          cursor: pointer;
-          transition: all 0.2s ease;
-        }
-
-        .recommendation-action:hover {
-          transform: translateY(-1px);
-          box-shadow: 0 4px 12px rgba(139, 92, 246, 0.3);
-        }
-
-        .recommendation-action.loading {
-          opacity: 0.7;
-          cursor: not-allowed;
-        }
-
-        .recommendation-action:disabled {
-          opacity: 0.5;
-          cursor: not-allowed;
-        }
-
-        /* Alert Page Styles */
-        .alerts-container {
-          display: flex;
-          flex-direction: column;
-          gap: 24px;
-        }
-
-        .alerts-summary {
-          display: grid;
-          grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-          gap: 16px;
-        }
-
-        .summary-card {
-          background: linear-gradient(180deg, #1a1a1a 0%, #161616 100%);
-          border: 1px solid #2a2a2a;
-          border-radius: 12px;
-          padding: 20px;
-          text-align: center;
-          border-left: 4px solid;
-        }
-
-        .summary-card.error {
-          border-left-color: #ef4444;
-        }
-
-        .summary-card.warning {
-          border-left-color: #f59e0b;
-        }
-
-        .summary-card.success {
-          border-left-color: #10b981;
-        }
-
-        .summary-card.info {
-          border-left-color: #3b82f6;
-        }
-
-        .summary-card h4 {
-          font-size: 28px;
-          font-weight: 700;
-          margin: 0 0 8px 0;
-          color: #ffffff;
-        }
-
-        .summary-card p {
-          font-size: 14px;
-          color: #9ca3af;
-          margin: 0;
-        }
-
-        .summary-trend {
-          font-size: 11px;
-          color: #9ca3af;
-          margin-top: 4px;
-          display: block;
-        }
-
-        .alerts-list {
-          display: flex;
-          flex-direction: column;
-          gap: 12px;
-        }
-
-        .alert-item {
-          display: flex;
-          align-items: center;
-          gap: 16px;
-          background: linear-gradient(180deg, #1a1a1a 0%, #161616 100%);
-          border: 1px solid #2a2a2a;
-          border-radius: 12px;
-          padding: 16px;
-          border-left: 4px solid;
-        }
-
-        .alert-item.error {
-          border-left-color: #ef4444;
-        }
-
-        .alert-item.warning {
-          border-left-color: #f59e0b;
-        }
-
-        .alert-icon {
-          width: 20px;
-          height: 20px;
-        }
-
-        .alert-icon.error {
-          color: #ef4444;
-        }
-
-        .alert-icon.warning {
-          color: #f59e0b;
-        }
-
-        .alert-content {
-          flex: 1;
-        }
-
-        .alert-message {
-          font-size: 14px;
-          color: #ffffff;
-          margin-bottom: 4px;
-        }
-
-        .alert-meta {
-          display: flex;
-          align-items: center;
-          gap: 12px;
-        }
-
-        .alert-time {
-          font-size: 12px;
-          color: #9ca3af;
-        }
-
-        .alert-severity {
-          font-size: 11px;
-          padding: 2px 8px;
-          border-radius: 4px;
-          font-weight: 500;
-        }
-
-        .alert-severity.high {
-          background: rgba(239, 68, 68, 0.2);
-          color: #ef4444;
-        }
-
-        .alert-severity.medium {
-          background: rgba(245, 158, 11, 0.2);
-          color: #f59e0b;
-        }
-
-        .alert-feature {
-          background: rgba(139, 92, 246, 0.2);
-          color: #8b5cf6;
-          padding: 2px 8px;
-          border-radius: 4px;
-          font-size: 10px;
-          font-weight: 500;
-        }
-
-        .alert-region {
-          background: rgba(59, 130, 246, 0.2);
-          color: #3b82f6;
-          padding: 2px 8px;
-          border-radius: 4px;
-          font-size: 10px;
-          font-weight: 500;
-        }
-
-        .alert-actions {
-          display: flex;
-          gap: 8px;
-        }
-
-        .alert-action-btn {
-          background: rgba(139, 92, 246, 0.1);
-          border: 1px solid rgba(139, 92, 246, 0.2);
-          border-radius: 6px;
-          padding: 6px 12px;
-          color: #8b5cf6;
-          font-size: 12px;
-          cursor: pointer;
-          transition: all 0.2s ease;
-        }
-
-        .alert-action-btn:hover {
-          background: rgba(139, 92, 246, 0.2);
-        }
-
-        /* Enhanced Training Page Styles */
-        .enhanced-training-banner {
-          background: linear-gradient(135deg, #10b981 0%, #059669 50%, #047857 100%);
-          border-radius: 16px;
-          margin-bottom: 32px;
-          padding: 24px;
-          box-shadow: 0 8px 25px rgba(16, 185, 129, 0.2);
-        }
-
-        .banner-content {
-          display: flex;
-          align-items: center;
-          gap: 20px;
-        }
-
-        .banner-icon {
-          color: #ffffff;
-          background: rgba(255, 255, 255, 0.15);
-          padding: 12px;
-          border-radius: 12px;
-        }
-
-        .banner-text {
-          flex: 1;
-          color: #ffffff;
-          font-weight: 600;
-          font-size: 16px;
-        }
-
-        .banner-button {
-          background: rgba(255, 255, 255, 0.15);
-          border: 2px solid rgba(255, 255, 255, 0.2);
-          border-radius: 10px;
-          padding: 12px 24px;
-          color: #ffffff;
-          cursor: pointer;
-          font-size: 14px;
-          font-weight: 600;
-          transition: all 0.2s ease;
-        }
-
-        .banner-button:hover {
-          background: rgba(255, 255, 255, 0.25);
-          transform: translateY(-1px);
-        }
-
-        .enhanced-performance-grid {
-          background: linear-gradient(135deg, #1a1a1a 0%, #161616 50%, #121212 100%);
-          border: 1px solid #2a2a2a;
-          border-radius: 20px;
-          padding: 32px;
-          margin-bottom: 40px;
-          box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
-        }
-
-        .performance-header {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          margin-bottom: 32px;
-          padding-bottom: 20px;
-          border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-        }
-
-        .performance-header h3 {
-          font-size: 24px;
-          font-weight: 800;
-          color: #ffffff;
-          margin: 0;
-        }
-
-        .phase-selector {
-          display: flex;
-          gap: 4px;
-          background: rgba(255, 255, 255, 0.08);
-          border-radius: 12px;
-          padding: 6px;
-        }
-
-        .phase-btn {
-          background: transparent;
-          border: none;
-          border-radius: 8px;
-          padding: 12px 20px;
-          color: #9ca3af;
-          font-size: 13px;
-          font-weight: 600;
-          cursor: pointer;
-          transition: all 0.3s ease;
-        }
-
-        .phase-btn:hover {
-          background: rgba(139, 92, 246, 0.1);
-          color: #ffffff;
-        }
-
-        .phase-btn.active {
-          background: linear-gradient(135deg, #8b5cf6 0%, #a855f7 100%);
-          color: #ffffff;
-        }
-
-        .performance-overview {
-          display: flex;
-          flex-direction: column;
-          gap: 32px;
-        }
-
-        .performance-summary {
-          display: grid;
-          grid-template-columns: repeat(4, 1fr);
-          gap: 24px;
-        }
-
-        .summary-stat {
-          text-align: center;
-          padding: 24px 20px;
-          background: rgba(139, 92, 246, 0.08);
-          border-radius: 16px;
-          border: 1px solid rgba(139, 92, 246, 0.2);
-        }
-
-        .stat-label {
-          display: block;
-          font-size: 13px;
-          color: #9ca3af;
-          margin-bottom: 12px;
-          font-weight: 500;
-          text-transform: uppercase;
-        }
-
-        .stat-value {
-          display: block;
-          font-size: 28px;
-          font-weight: 800;
-          color: #ffffff;
-          margin-bottom: 8px;
-        }
-
-        .stat-detail {
-          display: block;
-          font-size: 11px;
-          color: #6b7280;
-          font-weight: 500;
-        }
-
-        .phase-comparison {
-          display: grid;
-          grid-template-columns: 1fr 1fr;
-          gap: 24px;
-        }
-
-        .phase-card {
-          background: rgba(255, 255, 255, 0.03);
-          border: 1px solid #2a2a2a;
-          border-radius: 16px;
-          padding: 24px;
-        }
-
-        .phase-card.forward {
-          border-left: 4px solid #10b981;
-        }
-
-        .phase-card.backward {
-          border-left: 4px solid #ef4444;
-        }
-
-        .phase-header {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          margin-bottom: 20px;
-          padding-bottom: 16px;
-          border-bottom: 1px solid rgba(255, 255, 255, 0.05);
-        }
-
-        .phase-header h4 {
-          font-size: 16px;
-          font-weight: 600;
-          color: #ffffff;
-          margin: 0;
-        }
-
-        .phase-time {
-          font-size: 20px;
-          font-weight: 700;
-        }
-
-        .phase-card.forward .phase-time {
-          color: #10b981;
-        }
-
-        .phase-card.backward .phase-time {
-          color: #ef4444;
-        }
-
-        .phase-metrics {
-          display: flex;
-          flex-direction: column;
-          gap: 12px;
-        }
-
-        .phase-metric {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          font-size: 14px;
-          padding: 8px 12px;
-          background: rgba(255, 255, 255, 0.02);
-          border-radius: 8px;
-        }
-
-        .phase-metric span:first-child {
-          color: #9ca3af;
-          font-weight: 500;
-        }
-
-        .phase-metric span:last-child {
-          color: #ffffff;
-          font-weight: 700;
-        }
-
-        .performance-insight {
-          display: flex;
-          align-items: center;
-          gap: 20px;
-          padding: 24px;
-          background: rgba(139, 92, 246, 0.12);
-          border: 1px solid rgba(139, 92, 246, 0.3);
-          border-radius: 16px;
-        }
-
-        .insight-icon {
-          font-size: 28px;
-        }
-
-        .insight-content h4 {
-          font-size: 18px;
-          font-weight: 700;
-          color: #ffffff;
-          margin: 0 0 8px 0;
-        }
-
-        .insight-content p {
-          font-size: 14px;
-          color: #d1d5db;
-          margin: 0;
-        }
-
-        .phase-detail {
-          background: rgba(255, 255, 255, 0.03);
-          border: 1px solid #2a2a2a;
-          border-radius: 20px;
-          padding: 32px;
-        }
-
-        .phase-detail.forward {
-          border-left: 4px solid #10b981;
-        }
-
-        .phase-detail.backward {
-          border-left: 4px solid #ef4444;
-        }
-
-        .detail-header {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          margin-bottom: 32px;
-          padding-bottom: 20px;
-          border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-        }
-
-        .detail-header h4 {
-          font-size: 24px;
-          font-weight: 700;
-          color: #ffffff;
-          margin: 0;
-        }
-
-        .detail-status .status-badge {
-          padding: 6px 16px;
-          border-radius: 8px;
-          font-size: 11px;
-          font-weight: 600;
-        }
-
-        .status-badge.good {
-          background: rgba(16, 185, 129, 0.2);
-          color: #10b981;
-        }
-
-        .detail-grid {
-          display: grid;
-          grid-template-columns: 1fr 1fr;
-          gap: 32px;
-          margin-bottom: 24px;
-        }
-
-        .detail-card {
-          background: rgba(139, 92, 246, 0.08);
-          border: 1px solid rgba(139, 92, 246, 0.15);
-          border-radius: 16px;
-          padding: 24px;
-        }
-
-        .detail-card h5 {
-          font-size: 16px;
-          font-weight: 700;
-          color: #ffffff;
-          margin: 0 0 20px 0;
-        }
-
-        .detail-metrics {
-          display: flex;
-          flex-direction: column;
-          gap: 12px;
-        }
-
-        .detail-metric {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          padding: 12px 16px;
-          background: rgba(255, 255, 255, 0.03);
-          border-radius: 10px;
-        }
-
-        .detail-metric span:first-child {
-          color: #9ca3af;
-          font-weight: 500;
-        }
-
-        .metric-highlight {
-          color: #8b5cf6 !important;
-          font-weight: 700 !important;
-        }
-
-        .optimization-suggestions {
-          margin-top: 24px;
-        }
-
-        .optimization-suggestions h5 {
-          font-size: 16px;
-          font-weight: 600;
-          color: #ffffff;
-          margin: 0 0 16px 0;
-        }
-
-        .suggestions-list {
-          display: flex;
-          flex-direction: column;
-          gap: 8px;
-        }
-
-        .suggestion-item {
-          padding: 8px 12px;
-          border-radius: 6px;
-          font-size: 12px;
-          font-weight: 500;
-        }
-
-        .suggestion-item.good {
-          background: rgba(16, 185, 129, 0.1);
-          color: #10b981;
-        }
-
-        .suggestion-item.info {
-          background: rgba(59, 130, 246, 0.1);
-          color: #3b82f6;
-        }
-
-        .training-enhanced-grid {
-          display: grid;
-          grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-          gap: 24px;
-          margin-bottom: 32px;
-        }
-
-        .chart-container.large {
-          grid-column: span 2;
-          height: 400px;
-        }
-
-        .training-recommendations {
-          margin-bottom: 32px;
-        }
-
-        .training-recommendations h3 {
-          font-size: 20px;
-          font-weight: 600;
-          margin: 0 0 16px 0;
-          color: #ffffff;
-        }
-
-        /* Spatial Page Styles */
-        .spatial-status-banner {
-          background: linear-gradient(135deg, #1a1a1a 0%, #2a2a2a 100%);
-          border: 1px solid #3a3a3a;
-          border-radius: 12px;
-          padding: 20px;
-          margin-bottom: 24px;
-        }
-
-        .status-summary {
-          display: flex;
-          align-items: center;
-          gap: 24px;
-          flex-wrap: wrap;
-        }
-
-        .status-item {
-          display: flex;
-          align-items: center;
-          gap: 8px;
-          font-size: 14px;
-          font-weight: 500;
-        }
-
-        .status-item.healthy .status-dot {
-          background: #10b981;
-        }
-
-        .status-item.warning .status-dot {
-          background: #f59e0b;
-        }
-
-        .status-item.error .status-dot {
-          background: #ef4444;
-        }
-
-        .status-dot {
-          width: 8px;
-          height: 8px;
-          border-radius: 50%;
-        }
-
-        .status-metric {
-          color: #e5e7eb;
-          font-size: 14px;
-          font-weight: 500;
-        }
-
-        .spatial-layout {
-          display: grid;
-          grid-template-columns: 1fr 400px;
-          gap: 24px;
-          margin-bottom: 32px;
-        }
-
-        .globe-container {
-          background: linear-gradient(180deg, #1a1a1a 0%, #161616 100%);
-          border: 1px solid #2a2a2a;
-          border-radius: 16px;
-          padding: 24px;
-          height: 500px;
-          display: flex;
-          flex-direction: column;
-        }
-
-        .globe-header {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          margin-bottom: 16px;
-        }
-
-        .globe-header h3 {
-          font-size: 18px;
-          font-weight: 600;
-          color: #ffffff;
-          margin: 0;
-        }
-
-        .globe-controls {
-          display: flex;
-          gap: 8px;
-        }
-
-        .control-btn {
-          background: rgba(139, 92, 246, 0.1);
-          border: 1px solid rgba(139, 92, 246, 0.2);
-          border-radius: 6px;
-          padding: 6px 12px;
-          color: #8b5cf6;
-          font-size: 12px;
-          cursor: pointer;
-          transition: all 0.2s ease;
-        }
-
-        .control-btn.active {
-          background: rgba(139, 92, 246, 0.3);
-          border-color: #8b5cf6;
-          color: #ffffff;
-        }
-
-        .flat-map-container {
-          flex: 1;
-          background: #0a0a0a;
-          border-radius: 8px;
-          overflow: hidden;
-          position: relative;
-        }
-
-        .world-map {
-          width: 100%;
-          height: 100%;
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          background: radial-gradient(circle at center, #1a1a1a 0%, #0a0a0a 100%);
-        }
-
-        .map-svg {
-          width: 100%;
-          height: 100%;
-          max-width: 100%;
-          max-height: 100%;
-        }
-
-        .deployment-point {
-          cursor: pointer;
-          transition: all 0.2s ease;
-        }
-
-        .deployment-point:hover .deployment-circle {
-          r: 16;
-          stroke-width: 3;
-        }
-
-        .deployment-point:hover .deployment-glow {
-          opacity: 0.4;
-          r: 25;
-        }
-
-        .globe-canvas {
-          flex: 1;
-          border-radius: 8px;
-          overflow: hidden;
-        }
-
-        .globe-legend {
-          display: flex;
-          justify-content: center;
-          gap: 24px;
-          margin-top: 16px;
-        }
-
-        .legend-item {
-          display: flex;
-          align-items: center;
-          gap: 8px;
-          font-size: 14px;
-          color: #e5e7eb;
-          font-weight: 500;
-        }
-
-        .legend-dot {
-          width: 8px;
-          height: 8px;
-          border-radius: 50%;
-        }
-
-        .legend-dot.healthy {
-          background: #10b981;
-        }
-
-        .legend-dot.warning {
-          background: #f59e0b;
-        }
-
-        .legend-dot.error {
-          background: #ef4444;
-        }
-
-        .deployment-details {
-          background: linear-gradient(180deg, #1a1a1a 0%, #161616 100%);
-          border: 1px solid #2a2a2a;
-          border-radius: 16px;
-          padding: 24px;
-          height: 500px;
-          overflow-y: auto;
-        }
-
-        .deployment-details h3 {
-          font-size: 18px;
-          font-weight: 600;
-          color: #ffffff;
-          margin: 0 0 16px 0;
-        }
-
-        .deployment-list {
-          display: flex;
-          flex-direction: column;
-          gap: 12px;
-        }
-
-        .deployment-card {
-          background: rgba(255, 255, 255, 0.02);
-          border: 1px solid #2a2a2a;
-          border-radius: 12px;
-          padding: 16px;
-          cursor: pointer;
-          transition: all 0.2s ease;
-        }
-
-        .deployment-card:hover {
-          border-color: #8b5cf6;
-          background: rgba(139, 92, 246, 0.05);
-        }
-
-        .deployment-card.selected {
-          border-color: #8b5cf6;
-          background: rgba(139, 92, 246, 0.1);
-        }
-
-        .deployment-header {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          margin-bottom: 12px;
-        }
-
-        .deployment-name {
-          display: flex;
-          align-items: center;
-          gap: 8px;
-          font-weight: 600;
-          color: #f3f4f6;
-        }
-
-        .status-indicator-dot {
-          width: 8px;
-          height: 8px;
-          border-radius: 50%;
-        }
-
-        .deployment-status {
-          font-size: 11px;
-          padding: 4px 8px;
-          border-radius: 4px;
-          font-weight: 500;
-        }
-
-        .deployment-status.healthy {
-          background: rgba(16, 185, 129, 0.2);
-          color: #10b981;
-        }
-
-        .deployment-status.warning {
-          background: rgba(245, 158, 11, 0.2);
-          color: #f59e0b;
-        }
-
-        .deployment-status.error {
-          background: rgba(239, 68, 68, 0.2);
-          color: #ef4444;
-        }
-
-        .deployment-metrics {
-          display: grid;
-          grid-template-columns: repeat(3, 1fr);
-          gap: 12px;
-          margin-bottom: 12px;
-        }
-
-        .metric {
-          text-align: center;
-        }
-
-        .metric-label {
-          display: block;
-          font-size: 11px;
-          color: #9ca3af;
-          margin-bottom: 4px;
-        }
-
-        .metric-value {
-          font-size: 16px;
-          font-weight: 700;
-          color: #f9fafb;
-        }
-
-        .deployment-actions {
-          display: flex;
-          gap: 8px;
-          margin-top: 12px;
-          padding-top: 12px;
-          border-top: 1px solid #2a2a2a;
-        }
-
-        .action-btn {
-          border: none;
-          border-radius: 6px;
-          padding: 6px 12px;
-          font-size: 12px;
-          font-weight: 500;
-          cursor: pointer;
-          transition: all 0.2s ease;
-        }
-
-        .action-btn.primary {
-          background: linear-gradient(135deg, #8b5cf6 0%, #a855f7 100%);
-          color: #ffffff;
-        }
-
-        .action-btn.secondary {
-          background: rgba(255, 255, 255, 0.05);
-          border: 1px solid #2a2a2a;
-          color: #9ca3af;
-        }
-
-        .action-btn:hover {
-          transform: translateY(-1px);
-        }
-
-        .spatial-metrics {
-          margin-top: 32px;
-        }
-
-        .metrics-grid {
-          display: grid;
-          grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
-          gap: 24px;
-        }
-
-        .metric-panel {
-          background: linear-gradient(180deg, #1a1a1a 0%, #161616 100%);
-          border: 1px solid #2a2a2a;
-          border-radius: 16px;
-          padding: 24px;
-        }
-
-        .metric-panel h4 {
-          font-size: 16px;
-          font-weight: 600;
-          color: #ffffff;
-          margin: 0 0 16px 0;
-        }
-
-        /* Drift Page Styles */
-        .drift-alert-banner {
-          background: linear-gradient(90deg, #ef4444, #dc2626);
-          border-radius: 12px;
-          margin-bottom: 24px;
-          padding: 16px;
-          animation: pulse 2s infinite;
-        }
-
-        .alert-content {
-          display: flex;
-          align-items: center;
-          gap: 16px;
-        }
-
-        .alert-text {
-          flex: 1;
-          color: #ffffff;
-          font-weight: 500;
-        }
-
-        .alert-action {
-          background: rgba(255, 255, 255, 0.2);
-          border: 1px solid rgba(255, 255, 255, 0.3);
-          border-radius: 8px;
-          padding: 8px 16px;
-          color: #ffffff;
-          cursor: pointer;
-          font-size: 14px;
-          transition: all 0.2s ease;
-        }
-
-        .alert-action:hover {
-          background: rgba(255, 255, 255, 0.3);
-        }
-
-        .drift-summary {
-          display: grid;
-          grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-          gap: 20px;
-          margin-bottom: 32px;
-        }
-
-        .drift-layout {
-          display: grid;
-          grid-template-columns: 400px 1fr;
-          gap: 24px;
-          margin-bottom: 32px;
-        }
-
-        .features-panel {
-          background: linear-gradient(180deg, #1a1a1a 0%, #161616 100%);
-          border: 1px solid #2a2a2a;
-          border-radius: 16px;
-          padding: 24px;
-          height: fit-content;
-          max-height: 700px;
-          overflow-y: auto;
-        }
-
-        .panel-header {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          margin-bottom: 20px;
-          padding-bottom: 16px;
-          border-bottom: 1px solid #2a2a2a;
-        }
-
-        .panel-header h3 {
-          font-size: 18px;
-          font-weight: 600;
-          color: #ffffff;
-          margin: 0;
-        }
-
-        .time-select {
-          background: rgba(255, 255, 255, 0.05);
-          border: 1px solid #2a2a2a;
-          border-radius: 6px;
-          padding: 6px 12px;
-          color: #ffffff;
-          font-size: 12px;
-        }
-
-        .features-list {
-          display: flex;
-          flex-direction: column;
-          gap: 12px;
-        }
-
-        .feature-item {
-          background: rgba(255, 255, 255, 0.02);
-          border: 1px solid #2a2a2a;
-          border-radius: 12px;
-          padding: 16px;
-          cursor: pointer;
-          transition: all 0.2s ease;
-        }
-
-        .feature-item:hover {
-          border-color: #8b5cf6;
-          background: rgba(139, 92, 246, 0.05);
-        }
-
-        .feature-item.selected {
-          border-color: #8b5cf6;
-          background: rgba(139, 92, 246, 0.1);
-        }
-
-        .feature-header {
-          display: flex;
-          justify-content: space-between;
-          align-items: flex-start;
-          margin-bottom: 12px;
-        }
-
-        .feature-info {
-          display: flex;
-          flex-direction: column;
-          gap: 4px;
-        }
-
-        .feature-name {
-          font-weight: 500;
-          color: #ffffff;
-          font-size: 14px;
-        }
-
-        .feature-type {
-          font-size: 11px;
-          color: #9ca3af;
-          background: rgba(255, 255, 255, 0.05);
-          padding: 2px 6px;
-          border-radius: 3px;
-          width: fit-content;
-        }
-
-        .feature-status-dot {
-          width: 8px;
-          height: 8px;
-          border-radius: 50%;
-          margin-top: 3px;
-        }
-
-        .feature-drift {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          margin-bottom: 8px;
-        }
-
-        .drift-label {
-          font-size: 12px;
-          color: #9ca3af;
-        }
-
-        .drift-value {
-          font-size: 14px;
-          font-weight: 600;
-        }
-
-        .drift-bar {
-          height: 4px;
-          background: rgba(255, 255, 255, 0.1);
-          border-radius: 2px;
-          overflow: hidden;
-        }
-
-        .drift-progress {
-          height: 100%;
-          border-radius: 2px;
-          transition: width 0.3s ease;
-        }
-
-        .analysis-panel {
-          display: flex;
-          flex-direction: column;
-          gap: 24px;
-        }
-
-        .analysis-header {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-        }
-
-        .analysis-header h3 {
-          font-size: 24px;
-          font-weight: 700;
-          color: #ffffff;
-          margin: 0;
-        }
-
-        .analysis-actions {
-          display: flex;
-          gap: 8px;
-        }
-
-        .chart-legend {
-          display: flex;
-          gap: 16px;
-        }
-
-        .legend-color {
-          width: 12px;
-          height: 12px;
-          border-radius: 2px;
-        }
-
-        .stats-grid {
-          display: grid;
-          grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-          gap: 16px;
-          margin-top: 24px;
-        }
-
-        .stat-card {
-          background: linear-gradient(180deg, #1a1a1a 0%, #161616 100%);
-          border: 1px solid #2a2a2a;
-          border-radius: 12px;
-          padding: 20px;
-          text-align: center;
-        }
-
-        .stat-card h5 {
-          font-size: 12px;
-          color: #9ca3af;
-          margin: 0 0 8px 0;
-          font-weight: 500;
-        }
-
-        .stat-value {
-          font-size: 24px;
-          font-weight: 700;
-          margin: 8px 0;
-        }
-
-        .stat-value.critical {
-          color: #ef4444;
-        }
-
-        .stat-value.warning {
-          color: #f59e0b;
-        }
-
-        .stat-value.good {
-          color: #10b981;
-        }
-
-        .stat-description {
-          font-size: 11px;
-          color: #9ca3af;
-        }
-
-        .drift-recommendations {
-          margin-top: 48px;
-        }
-
-        .drift-recommendations h2 {
-          font-size: 24px;
-          font-weight: 700;
-          margin: 0 0 24px 0;
-          color: #ffffff;
-          background: linear-gradient(135deg, #ffffff 0%, #9ca3af 100%);
-          -webkit-background-clip: text;
-          -webkit-text-fill-color: transparent;
-          background-clip: text;
-        }
-
-        /* Logs Page Styles */
-        .logs-summary {
-          display: grid;
-          grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-          gap: 16px;
-          margin-bottom: 24px;
-        }
-
-        .logs-summary .summary-card {
-          background: linear-gradient(180deg, #1a1a1a 0%, #161616 100%);
-          border: 1px solid #2a2a2a;
-          border-radius: 12px;
-          padding: 20px;
-          display: flex;
-          align-items: center;
-          gap: 16px;
-          border-left: 4px solid;
-        }
-
-        .logs-summary .summary-card.error {
-          border-left-color: #ef4444;
-        }
-
-        .logs-summary .summary-card.warning {
-          border-left-color: #f59e0b;
-        }
-
-        .logs-summary .summary-card.info {
-          border-left-color: #3b82f6;
-        }
-
-        .logs-summary .summary-card.success {
-          border-left-color: #10b981;
-        }
-
-        .summary-icon {
-          padding: 8px;
-          border-radius: 8px;
-          background: rgba(139, 92, 246, 0.1);
-          color: #8b5cf6;
-        }
-
-        .summary-content h4 {
-          font-size: 24px;
-          font-weight: 700;
-          margin: 0 0 4px 0;
-          color: #ffffff;
-        }
-
-        .summary-content p {
-          font-size: 12px;
-          color: #9ca3af;
-          margin: 0;
-        }
-
-        .logs-controls {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          background: linear-gradient(180deg, #1a1a1a 0%, #161616 100%);
-          border: 1px solid #2a2a2a;
-          border-radius: 12px;
-          padding: 20px;
-          margin-bottom: 24px;
-          gap: 16px;
-          flex-wrap: wrap;
-        }
-
-        .controls-left {
-          display: flex;
-          gap: 12px;
-          flex-wrap: wrap;
-        }
-
-        .controls-right {
-          display: flex;
-          gap: 8px;
-          flex-wrap: wrap;
-        }
-
-        .search-container {
-          position: relative;
-          min-width: 300px;
-        }
-
-        .search-input {
-          width: 100%;
-          background: rgba(255, 255, 255, 0.05);
-          border: 1px solid #2a2a2a;
-          border-radius: 8px;
-          padding: 10px 16px;
-          color: #ffffff;
-          font-size: 14px;
-          transition: all 0.2s ease;
-        }
-
-        .search-input:focus {
-          outline: none;
-          border-color: #8b5cf6;
-          background: rgba(139, 92, 246, 0.1);
-        }
-
-        .search-input::placeholder {
-          color: #6b7280;
-        }
-
-        .filter-select {
-          background: rgba(255, 255, 255, 0.05);
-          border: 1px solid #2a2a2a;
-          border-radius: 8px;
-          padding: 10px 16px;
-          color: #ffffff;
-          font-size: 14px;
-          min-width: 120px;
-          cursor: pointer;
-        }
-
-        .filter-select:focus {
-          outline: none;
-          border-color: #8b5cf6;
-        }
-
-        .auto-refresh-btn {
-          display: flex;
-          align-items: center;
-          gap: 8px;
-          background: rgba(139, 92, 246, 0.1);
-          border: 1px solid rgba(139, 92, 246, 0.2);
-          border-radius: 8px;
-          padding: 10px 16px;
-          color: #8b5cf6;
-          font-size: 14px;
-          cursor: pointer;
-          transition: all 0.2s ease;
-        }
-
-        .auto-refresh-btn.active {
-          background: rgba(139, 92, 246, 0.2);
-          border-color: #8b5cf6;
-        }
-
-        .auto-refresh-btn:hover {
-          background: rgba(139, 92, 246, 0.2);
-        }
-
-        .logs-layout {
-          display: grid;
-          grid-template-columns: 1fr 350px;
-          gap: 24px;
-        }
-
-        .logs-list {
-          background: linear-gradient(180deg, #1a1a1a 0%, #161616 100%);
-          border: 1px solid #2a2a2a;
-          border-radius: 16px;
-          padding: 24px;
-          height: 600px;
-          display: flex;
-          flex-direction: column;
-        }
-
-        .logs-header {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          margin-bottom: 20px;
-          padding-bottom: 16px;
-          border-bottom: 1px solid #2a2a2a;
-        }
-
-        .logs-header h3 {
-          font-size: 18px;
-          font-weight: 600;
-          color: #ffffff;
-          margin: 0;
-        }
-
-        .logs-container {
-          flex: 1;
-          overflow-y: auto;
-          display: flex;
-          flex-direction: column;
-          gap: 8px;
-        }
-
-        .log-entry {
-          background: rgba(255, 255, 255, 0.02);
-          border: 1px solid #2a2a2a;
-          border-radius: 8px;
-          padding: 16px;
-          cursor: pointer;
-          transition: all 0.2s ease;
-          border-left: 4px solid;
-        }
-
-        .log-entry.error {
-          border-left-color: #ef4444;
-        }
-
-        .log-entry.warning {
-          border-left-color: #f59e0b;
-        }
-
-        .log-entry.info {
-          border-left-color: #3b82f6;
-        }
-
-        .log-entry.debug {
-          border-left-color: #9ca3af;
-        }
-
-        .log-entry:hover {
-          background: rgba(255, 255, 255, 0.05);
-          border-color: #8b5cf6;
-        }
-
-        .log-entry.selected {
-          background: rgba(139, 92, 246, 0.1);
-          border-color: #8b5cf6;
-        }
-
-        .log-main {
-          display: flex;
-          flex-direction: column;
-          gap: 8px;
-        }
-
-        .log-header {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-        }
-
-        .log-level {
-          display: flex;
-          align-items: center;
-          gap: 6px;
-          font-size: 11px;
-          font-weight: 600;
-          text-transform: uppercase;
-        }
-
-        .log-timestamp {
-          font-size: 11px;
-          color: #6b7280;
-          font-family: 'Courier New', monospace;
-        }
-
-        .log-message {
-          color: #ffffff;
-          font-size: 14px;
-          line-height: 1.4;
-        }
-
-        .log-meta {
-          display: flex;
-          justify-content: space-between;
-          align-items: center;
-          gap: 12px;
-        }
-
-        .log-source {
-          padding: 4px 8px;
-          border-radius: 4px;
-          font-size: 10px;
-          font-weight: 500;
-          text-transform: uppercase;
-          background: rgba(139, 92, 246, 0.2);
-          color: #8b5cf6;
-        }
-
-        .log-tags {
-          display: flex;
-          gap: 6px;
-          flex-wrap: wrap;
-        }
-
-        .log-tag {
-          background: rgba(139, 92, 246, 0.2);
-          color: #8b5cf6;
-          padding: 2px 6px;
-          border-radius: 3px;
-          font-size: 10px;
-          font-weight: 500;
-        }
-
-        .log-details {
-          margin-top: 16px;
-          padding-top: 16px;
-          border-top: 1px solid #2a2a2a;
-        }
-
-        .log-details h4 {
-          font-size: 14px;
-          font-weight: 600;
-          color: #ffffff;
-          margin: 0 0 12px 0;
-        }
-
-        .details-grid {
-          display: grid;
-          gap: 8px;
-          margin-bottom: 16px;
-        }
-
-        .detail-item {
-          display: grid;
-          grid-template-columns: 150px 1fr;
-          gap: 12px;
-          font-size: 12px;
-        }
-
-        .detail-key {
-          color: #9ca3af;
-          font-weight: 500;
-          text-transform: capitalize;
-        }
-
-        .detail-value {
-          color: #ffffff;
-          font-family: 'Courier New', monospace;
-          word-break: break-all;
-        }
-
-        .logs-sidebar {
-          display: flex;
-          flex-direction: column;
-          gap: 20px;
-        }
-
-        .sidebar-section {
-          background: linear-gradient(180deg, #1a1a1a 0%, #161616 100%);
-          border: 1px solid #2a2a2a;
-          border-radius: 12px;
-          padding: 20px;
-        }
-
-        .sidebar-section h4 {
-          font-size: 16px;
-          font-weight: 600;
-          color: #ffffff;
-          margin: 0 0 16px 0;
-        }
-
-        .log-chart {
-          height: 200px;
-        }
-
-        /* Responsive Design */
-        @media (max-width: 1200px) {
-          .spatial-layout {
-            grid-template-columns: 1fr;
-          }
-
-          .deployment-details {
-            height: auto;
-            max-height: 400px;
-          }
-
-          .drift-layout {
-            grid-template-columns: 1fr;
-          }
-
-          .features-panel {
-            max-height: none;
-          }
-
-          .performance-summary {
-            grid-template-columns: repeat(2, 1fr);
-          }
-          
-          .phase-comparison {
-            grid-template-columns: 1fr;
-          }
-          
-          .detail-grid {
-            grid-template-columns: 1fr;
-          }
-          
-          .chart-container.large {
-            grid-column: span 1;
-          }
-
-          .logs-layout {
-            grid-template-columns: 1fr;
-          }
-        }
-
-        @media (max-width: 768px) {
-          .app-container {
-            flex-direction: column;
-          }
-
-          .sidebar {
-            width: 100%;
-            height: auto;
-            flex-direction: row;
-            padding: 16px;
-            gap: 16px;
-          }
-
-          .nav {
-            flex-direction: row;
-            overflow-x: auto;
-          }
-
-          .interface-placeholder {
-            display: none;
-          }
-
-          .main-content {
-            padding: 16px;
-          }
-
-          .charts-grid {
-            grid-template-columns: 1fr;
-          }
-
-          .performance-summary {
-            grid-template-columns: 1fr;
-          }
-          
-          .banner-content {
-            flex-direction: column;
-            text-align: center;
-            gap: 16px;
-          }
-          
-          .performance-header {
-            flex-direction: column;
-            gap: 16px;
-            align-items: flex-start;
-          }
-          
-          .enhanced-performance-grid {
-            padding: 20px;
-          }
-
-          .logs-controls {
-            flex-direction: column;
-            align-items: stretch;
-          }
-
-          .controls-left, .controls-right {
-            justify-content: center;
-          }
-
-          .search-container {
-            min-width: auto;
-          }
-
-          .detail-item {
-            grid-template-columns: 1fr;
-            gap: 4px;
-          }
-
-          .logs-summary {
-            grid-template-columns: repeat(2, 1fr);
-          }
-        }
-      `}</style>
-    </div>
+    </>
   );
 };
 
