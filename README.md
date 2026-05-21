@@ -2,9 +2,6 @@
 
 A real-time AI model performance monitoring dashboard built with React. Track key metrics, visualize performance trends, and monitor model health in an intuitive interface.
 
-## 🚀 Live Demo
-
-[View Live App](https://tanhata.github.io/modelpulse-v2/)
 
 ## ✨ Features
 
